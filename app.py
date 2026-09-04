@@ -854,11 +854,18 @@ def check_kegg_status() -> dict:
 
 
 @st.cache_resource(ttl=300)
-except Exception as e:
-    return {
-        "status": "inactive",
-        "detail": f"RCSB PDB unreachable: {type(e).__name__}: {e}"
-    }
+def check_pdb_status() -> dict:
+    try:
+        r = requests.post(
+            "https://search.rcsb.org/rcsbsearch/v2/query",
+            json={
+                "query": {
+                    "type": "terminal",
+                    "service": "full_text",
+                    "parameters": {
+                        "value": "1ABC"
+                    }
+                },
                 "return_type": "entry",
                 "request_options": {
                     "paginate": {
