@@ -854,6 +854,7 @@ def check_kegg_status() -> dict:
 
 
 @st.cache_resource(ttl=300)
+@st.cache_resource(ttl=300)
 def check_pdb_status() -> dict:
     try:
         r = requests.post(
@@ -874,36 +875,30 @@ def check_pdb_status() -> dict:
                     }
                 }
             },
-            timeout=10
+            timeout=15
         )
-
-        r.raise_for_status()
-
+        # Health check: ถาได response กลบมา = server reachable
+        # ไม ใช raise_for_status() เพราะ 400/422 หมายถง server ทำงาน
         data = r.json()
-
         if "result_set" in data:
             return {
                 "status": "active",
                 "detail": "RCSB PDB reachable"
             }
-
         return {
             "status": "warning",
             "detail": "RCSB PDB responded but returned unexpected data"
         }
-
     except requests.exceptions.Timeout:
         return {
             "status": "warning",
             "detail": "RCSB PDB connection timeout"
         }
-
     except requests.exceptions.RequestException as e:
         return {
             "status": "inactive",
             "detail": f"RCSB PDB unreachable: {e}"
         }
-
     except Exception as e:
         return {
             "status": "inactive",
@@ -918,8 +913,12 @@ def render_sidebar_status():
     kegg = check_kegg_status()
     pdb = check_pdb_status()
 
-    def dot(status):
-        return {"active": "active", "inactive": "inactive"}.get(status, "inactive")
+def dot(status):
+    return {
+        "active": "active",
+        "warning": "warning",
+        "inactive": "inactive"
+    }.get(status, "inactive")
 
     st.markdown(
         f'<div class="status-block">'
