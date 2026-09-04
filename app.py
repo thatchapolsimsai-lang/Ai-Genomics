@@ -229,7 +229,7 @@ html, body, [data-testid="stAppViewContainer"] {
     gap: 6px !important;
 }
 
-[data-testid="stSidebar"] .stRadio label {
+[data-testid="stSidebar"] .stRadio [role="radiogroup"] label {
     font-size: 0.85rem !important;
     font-weight: 400 !important;
     color: var(--text-primary) !important;
@@ -243,15 +243,18 @@ html, body, [data-testid="stAppViewContainer"] {
     transition: all 0.15s ease;
 }
 
-[data-testid="stSidebar"] .stRadio label:hover {
+[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:hover {
     border-color: var(--accent) !important;
 }
 
-[data-testid="stSidebar"] .stRadio label[data-selected="true"] {
+[data-testid="stSidebar"] .stRadio [role="radiogroup"] label[data-selected="true"] {
     border-color: var(--accent) !important;
     background-color: var(--accent-light) !important;
     color: var(--accent) !important;
     font-weight: 500 !important;
+}
+    [data-testid="stSidebar"] .stRadio > label {
+    display: none !important;
 }
 
 /* Status indicators */
