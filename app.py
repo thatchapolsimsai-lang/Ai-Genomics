@@ -856,16 +856,59 @@ def check_kegg_status() -> dict:
 @st.cache_resource(ttl=300)
 def check_pdb_status() -> dict:
     try:
-        r = requests.get("https://search.rcsb.org/rcsbsearch/v2/query",
-                         json={"query": {"type": "terminal", "service": "full_text",
-                                          "parameters": {"value": "1ABC"}},
-                               "return_type": "entry",
-                               "request_options": {"paginate": {"start": 0, "rows": 1}}},
-                         timeout=10)
+        r = requests.post(
+            "https://search.rcsb.org/rcsbsearch/v2/query",
+            json={
+                "query": {
+                    "type": "terminal",
+                    "service": "full_text",
+                    "parameters": {
+                        "value": "1ABC"
+                    }
+                },
+                "return_type": "entry",
+                "request_options": {
+                    "paginate": {
+                        "start": 0,
+                        "rows": 1
+                    }
+                }
+            },
+            timeout=10
+        )
+
         r.raise_for_status()
-        return {"status": "active", "detail": "RCSB PDB reachable"}
-    except Exception:
-        return {"status": "inactive", "detail": "RCSB PDB unreachable"}
+
+        data = r.json()
+
+        if "result_set" in data:
+            return {
+                "status": "active",
+                "detail": "RCSB PDB reachable"
+            }
+
+        return {
+            "status": "warning",
+            "detail": "RCSB PDB responded but returned unexpected data"
+        }
+
+    except requests.exceptions.Timeout:
+        return {
+            "status": "warning",
+            "detail": "RCSB PDB connection timeout"
+        }
+
+    except requests.exceptions.RequestException as e:
+        return {
+            "status": "inactive",
+            "detail": f"RCSB PDB unreachable: {e}"
+        }
+
+    except Exception as e:
+        return {
+            "status": "inactive",
+            "detail": f"RCSB PDB check failed: {e}"
+        }
 
 
 def render_sidebar_status():
