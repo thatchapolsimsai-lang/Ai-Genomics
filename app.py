@@ -102,36 +102,36 @@ st.set_page_config(
 )
 
 # =============================================================================
-# Design System — Professional Scientific Web Application
+# Design System — Gemini-like Clean Scientific UI
 # =============================================================================
 DESIGN_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Noto+Sans+Thai:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
-    --bg: #FAFAFA;
-    --surface: #FFFFFF;
-    --text-primary: #1A1A2E;
-    --text-secondary: #555568;
-    --text-muted: #9CA3AF;
-    --accent: #2563EB;
-    --accent-hover: #1D4ED8;
-    --accent-light: #EFF6FF;
-    --border: #E5E7EB;
-    --border-light: #F3F4F6;
-    --success: #059669;
-    --success-bg: #ECFDF5;
-    --warning: #D97706;
+    --bg: #FFFFFF;
+    --surface: #F0F4F9;
+    --text-primary: #1F1F1F;
+    --text-secondary: #444746;
+    --text-muted: #747775;
+    --accent: #0B57D0;
+    --accent-hover: #0842A0;
+    --accent-light: #D3E3FD;
+    --border: #E3E3E3;
+    --border-light: #F2F2F2;
+    --success: #146C2E;
+    --success-bg: #E6F4EA;
+    --warning: #F59E0B;
     --warning-bg: #FFFBEB;
-    --error: #DC2626;
-    --error-bg: #FEF2F2;
-    --info: #3B82F6;
-    --info-bg: #EFF6FF;
+    --error: #B3261E;
+    --error-bg: #FCE8E6;
+    --info: #0A56D0;
+    --info-bg: #E8F0FE;
 }
 
 html, body, [data-testid="stAppViewContainer"] {
     background-color: var(--bg) !important;
     color: var(--text-primary) !important;
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+    font-family: 'Google Sans', 'Noto Sans Thai', 'Inter', -apple-system, sans-serif !important;
 }
 
 /* Remove excessive top spacing before main header */
@@ -172,12 +172,12 @@ html, body, [data-testid="stAppViewContainer"] {
 /* Sidebar */
 [data-testid="stSidebar"] {
     background-color: var(--surface) !important;
-    border-right: 1px solid var(--border) !important;
+    border-right: none !important;
     padding: 24px 20px !important;
 }
 
 [data-testid="stSidebar"] [data-testid="stSidebarTitle"] {
-    font-size: 1.1rem !important;
+    font-size: 1.2rem !important;
     font-weight: 700 !important;
     color: var(--text-primary) !important;
     margin-bottom: 24px !important;
@@ -220,7 +220,7 @@ html, body, [data-testid="stAppViewContainer"] {
 [data-testid="stSidebar"] .stTextInput > div {
     background-color: var(--bg) !important;
     border: 1px solid var(--border) !important;
-    border-radius: 6px !important;
+    border-radius: 8px !important;
     padding: 8px 12px !important;
     font-size: 0.875rem !important;
 }
@@ -237,7 +237,7 @@ html, body, [data-testid="stAppViewContainer"] {
     letter-spacing: normal !important;
     background-color: var(--bg) !important;
     border: 1px solid var(--border) !important;
-    border-radius: 6px !important;
+    border-radius: 8px !important;
     padding: 8px 14px !important;
     cursor: pointer;
     transition: all 0.15s ease;
@@ -253,7 +253,7 @@ html, body, [data-testid="stAppViewContainer"] {
     color: var(--accent) !important;
     font-weight: 500 !important;
 }
-    [data-testid="stSidebar"] .stRadio > label {
+[data-testid="stSidebar"] .stRadio > label {
     display: none !important;
 }
 
@@ -261,7 +261,7 @@ html, body, [data-testid="stAppViewContainer"] {
 .status-block {
     background-color: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 10px 12px;
     margin-bottom: 8px;
 }
@@ -270,7 +270,7 @@ html, body, [data-testid="stAppViewContainer"] {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 0.8rem;
+    font-size: 0.85rem;
     color: var(--text-secondary);
     margin-bottom: 4px;
 }
@@ -280,8 +280,8 @@ html, body, [data-testid="stAppViewContainer"] {
 }
 
 .status-dot {
-    width: 7px;
-    height: 7px;
+    width: 8px;
+    height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
 }
@@ -289,29 +289,27 @@ html, body, [data-testid="stAppViewContainer"] {
 .status-dot.active {
     background-color: var(--success);
 }
-
-.status-dot.inactive {
+.status-dot.warning {
     background-color: var(--warning);
 }
-
-.status-dot.error {
+.status-dot.inactive {
     background-color: var(--error);
 }
 
 .status-label {
     font-weight: 600;
     color: var(--text-primary);
-    font-size: 0.78rem;
+    font-size: 0.82rem;
 }
 
 .status-value {
-    font-size: 0.78rem;
+    font-size: 0.82rem;
     color: var(--text-secondary);
 }
 
 /* Main content headers */
 [data-testid="stMain"] h2 {
-    font-size: 1.2rem !important;
+    font-size: 1.25rem !important;
     font-weight: 600 !important;
     color: var(--text-primary) !important;
     margin-top: 24px !important;
@@ -319,7 +317,7 @@ html, body, [data-testid="stAppViewContainer"] {
 }
 
 [data-testid="stMain"] h3 {
-    font-size: 1.05rem !important;
+    font-size: 1.1rem !important;
     font-weight: 600 !important;
     color: var(--text-primary) !important;
     margin-top: 20px !important;
@@ -329,8 +327,8 @@ html, body, [data-testid="stAppViewContainer"] {
 /* Popover */
 [data-testid="stPopover"] button {
     background-color: var(--surface) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 6px !important;
+    border: none !important;
+    border-radius: 20px !important;
     color: var(--text-primary) !important;
     font-size: 0.85rem !important;
     font-weight: 500 !important;
@@ -339,16 +337,16 @@ html, body, [data-testid="stAppViewContainer"] {
 }
 
 [data-testid="stPopover"] button:hover {
-    border-color: var(--accent) !important;
+    background-color: var(--border) !important;
     color: var(--accent) !important;
 }
 
 /* File uploader */
 [data-testid="stFileUploader"] {
     border: 1px dashed var(--border) !important;
-    border-radius: 8px !important;
+    border-radius: 12px !important;
     padding: 16px !important;
-    background-color: var(--bg) !important;
+    background-color: var(--surface) !important;
 }
 
 [data-testid="stFileUploader"] [data-testid="stFileUploaderDropzone"] {
@@ -361,73 +359,86 @@ html, body, [data-testid="stAppViewContainer"] {
     color: var(--text-secondary) !important;
 }
 
-/* Chat */
+/* Chat UI (Gemini style) */
 [data-testid="stChatMessage"] {
-    border-radius: 10px !important;
-    padding: 16px 20px !important;
+    border: none !important;
+    background-color: transparent !important;
+    padding: 8px 16px !important;
     margin-bottom: 12px !important;
-    border: 1px solid var(--border) !important;
 }
 
 [data-testid="stChatMessage"][data-testid="stChatMessageUser"] {
-    background-color: var(--accent-light) !important;
-    border-color: #BFDBFE !important;
+    background-color: var(--surface) !important;
+    border-radius: 24px !important;
+    max-width: 85% !important;
+    margin-left: auto !important;
+    color: var(--text-primary) !important;
+    padding: 16px 24px !important;
 }
 
 [data-testid="stChatMessage"][data-testid="stChatMessageAssistant"] {
-    background-color: var(--surface) !important;
+    background-color: transparent !important;
+    padding: 16px 8px !important;
 }
 
 [data-testid="stChatInput"] {
-    border-radius: 8px !important;
+    border-radius: 32px !important;
     border: 1px solid var(--border) !important;
-    background-color: var(--surface) !important;
+    background-color: var(--bg) !important;
+    padding: 6px 12px !important;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.05) !important;
+}
+[data-testid="stChatInput"]:focus-within {
+    border-color: var(--accent) !important;
+    box-shadow: 0 2px 6px rgba(11, 87, 208, 0.1) !important;
 }
 
 [data-testid="stChatInput"] input {
-    font-size: 0.9rem !important;
+    font-size: 0.95rem !important;
 }
 
 /* Buttons */
 .stButton > button, .stDownloadButton > button {
-    background-color: var(--surface) !important;
+    background-color: var(--bg) !important;
     border: 1px solid var(--border) !important;
-    border-radius: 6px !important;
+    border-radius: 20px !important;
     color: var(--text-primary) !important;
     font-size: 0.875rem !important;
     font-weight: 500 !important;
-    padding: 10px 20px !important;
+    padding: 8px 24px !important;
     transition: all 0.15s ease;
 }
 
 .stButton > button:hover, .stDownloadButton > button:hover {
-    border-color: var(--accent) !important;
+    background-color: var(--surface) !important;
+    border-color: var(--border) !important;
     color: var(--accent) !important;
-    background-color: var(--bg) !important;
 }
 
 .stButton > button[kind="primary"], .stButton > button[type="primary"] {
     background-color: var(--accent) !important;
     border-color: var(--accent) !important;
     color: white !important;
+    border-radius: 24px !important;
 }
 
 .stButton > button[kind="primary"]:hover, .stButton > button[type="primary"]:hover {
     background-color: var(--accent-hover) !important;
     border-color: var(--accent-hover) !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
 
 /* Expander */
 [data-testid="stExpander"] {
     border: 1px solid var(--border) !important;
-    border-radius: 8px !important;
+    border-radius: 12px !important;
     background-color: var(--surface) !important;
 }
 
 [data-testid="stExpander"] summary {
-    font-size: 0.85rem !important;
-    font-weight: 600 !important;
-    color: var(--text-secondary) !important;
+    font-size: 0.9rem !important;
+    font-weight: 500 !important;
+    color: var(--text-primary) !important;
     padding: 12px 16px !important;
 }
 
@@ -437,32 +448,32 @@ html, body, [data-testid="stAppViewContainer"] {
 
 /* Code blocks */
 [data-testid="stCodeBlock"] {
-    background-color: #F3F4F6 !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 6px !important;
+    background-color: var(--surface) !important;
+    border: none !important;
+    border-radius: 12px !important;
     font-family: 'JetBrains Mono', 'Fira Code', monospace !important;
-    font-size: 0.8rem !important;
+    font-size: 0.85rem !important;
 }
 
 /* Metrics */
 [data-testid="stMetric"] {
     background-color: var(--surface) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 8px !important;
+    border: none !important;
+    border-radius: 12px !important;
     padding: 16px 20px !important;
 }
 
 [data-testid="stMetric"] [data-testid="stMetricLabel"] {
-    font-size: 0.72rem !important;
-    font-weight: 600 !important;
+    font-size: 0.75rem !important;
+    font-weight: 500 !important;
     color: var(--text-secondary) !important;
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
 
 [data-testid="stMetric"] [data-testid="stMetricValue"] {
-    font-size: 1.4rem !important;
-    font-weight: 700 !important;
+    font-size: 1.5rem !important;
+    font-weight: 500 !important;
     color: var(--text-primary) !important;
 }
 
@@ -474,8 +485,8 @@ html, body, [data-testid="stAppViewContainer"] {
 
 /* Subheader */
 [data-testid="stSubheader"] {
-    font-size: 1.05rem !important;
-    font-weight: 600 !important;
+    font-size: 1.1rem !important;
+    font-weight: 500 !important;
     color: var(--text-primary) !important;
     margin-top: 20px !important;
     margin-bottom: 10px !important;
@@ -484,18 +495,18 @@ html, body, [data-testid="stAppViewContainer"] {
 /* Text input / textarea */
 .stTextInput > div, .stTextArea > div {
     background-color: var(--surface) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 6px !important;
+    border: none !important;
+    border-radius: 8px !important;
     padding: 10px 14px !important;
 }
 
 .stTextInput > div:focus-within, .stTextArea > div:focus-within {
-    border-color: var(--accent) !important;
-    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1) !important;
+    border: 1px solid var(--accent) !important;
+    background-color: var(--bg) !important;
 }
 
 .stTextInput input, .stTextArea textarea {
-    font-size: 0.9rem !important;
+    font-size: 0.95rem !important;
     color: var(--text-primary) !important;
 }
 
@@ -505,33 +516,33 @@ html, body, [data-testid="stAppViewContainer"] {
 
 /* Alerts */
 [data-testid="stAlert"] {
-    border-radius: 6px !important;
-    font-size: 0.85rem !important;
+    border-radius: 8px !important;
+    font-size: 0.9rem !important;
     padding: 12px 16px !important;
+    border: none !important;
 }
 
 [data-testid="stAlertWarning"] {
     background-color: var(--warning-bg) !important;
-    border-color: #FDE68A !important;
     color: #92400E !important;
 }
 
 [data-testid="stAlertError"] {
     background-color: var(--error-bg) !important;
-    border-color: #FECACA !important;
     color: #991B1B !important;
 }
 
-/* Report body — serif for academic feel */
+/* Report body */
 .report-body {
     font-family: 'Source Serif 4', Georgia, serif !important;
-    font-size: 0.95rem !important;
+    font-size: 1rem !important;
     line-height: 1.75 !important;
     color: var(--text-primary) !important;
 }
 
 .report-body h1, .report-body h2, .report-body h3 {
-    font-family: 'Inter', sans-serif !important;
+    font-family: 'Google Sans', 'Inter', sans-serif !important;
+    font-weight: 500 !important;
     margin-top: 24px !important;
     margin-bottom: 12px !important;
 }
@@ -552,8 +563,8 @@ html, body, [data-testid="stAppViewContainer"] {
 /* Bordered container */
 .bordered-container {
     background-color: var(--surface) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 8px !important;
+    border: none !important;
+    border-radius: 12px !important;
     padding: 20px !important;
     margin-bottom: 20px !important;
 }
@@ -561,30 +572,30 @@ html, body, [data-testid="stAppViewContainer"] {
 /* Validation section */
 .validation-pass {
     color: var(--success) !important;
-    font-size: 0.85rem;
-    margin-bottom: 4px;
+    font-size: 0.9rem;
+    margin-bottom: 6px;
 }
 
 .validation-fail {
     color: var(--error) !important;
-    font-size: 0.85rem;
-    margin-bottom: 4px;
+    font-size: 0.9rem;
+    margin-bottom: 6px;
 }
 
 .validation-warn {
     color: var(--warning) !important;
-    font-size: 0.85rem;
-    margin-bottom: 4px;
+    font-size: 0.9rem;
+    margin-bottom: 6px;
 }
 
 /* Pipeline steps */
 .pipeline-step {
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 0.82rem;
+    gap: 10px;
+    font-size: 0.88rem;
     color: var(--text-secondary);
-    margin-bottom: 6px;
+    margin-bottom: 8px;
 }
 
 .pipeline-step.done {
@@ -603,18 +614,17 @@ html, body, [data-testid="stAppViewContainer"] {
 /* Analysis log */
 .analysis-log {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 0.78rem;
+    font-size: 0.8rem;
     color: var(--text-secondary);
     background-color: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 12px 16px;
     max-height: 200px;
     overflow-y: auto;
 }
 
 .analysis-log .log-entry {
-    margin-bottom: 3px;
+    margin-bottom: 4px;
 }
 
 .analysis-log .log-entry.error {
@@ -631,56 +641,54 @@ html, body, [data-testid="stAppViewContainer"] {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 12px 16px;
+    padding: 16px 20px;
     background-color: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: 12px;
     margin-bottom: 8px;
 }
 
 .confidence-score {
-    font-size: 1.5rem;
-    font-weight: 700;
+    font-size: 1.6rem;
+    font-weight: 500;
     color: var(--text-primary);
 }
 
 .confidence-label {
-    font-size: 0.8rem;
-    font-weight: 600;
+    font-size: 0.9rem;
+    font-weight: 500;
     color: var(--success);
 }
 
 .confidence-desc {
-    font-size: 0.75rem;
+    font-size: 0.85rem;
     color: var(--text-muted);
-    margin-top: 4px;
+    margin-top: 6px;
 }
 
 /* Evidence source */
 .evidence-source {
-    padding: 10px 14px;
+    padding: 12px 16px;
     background-color: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: 8px;
     margin-bottom: 8px;
-    font-size: 0.82rem;
+    font-size: 0.88rem;
 }
 
 .evidence-source .source-name {
-    font-weight: 600;
+    font-weight: 500;
     color: var(--text-primary);
     margin-bottom: 4px;
 }
 
 .evidence-source .source-detail {
     color: var(--text-secondary);
-    font-size: 0.78rem;
+    font-size: 0.82rem;
 }
 
 /* Spinner */
 [data-testid="stSpinner"] {
     color: var(--accent) !important;
-    font-size: 0.85rem !important;
+    font-size: 0.9rem !important;
 }
 
 /* Scrollbar */
@@ -695,11 +703,11 @@ html, body, [data-testid="stAppViewContainer"] {
 
 ::-webkit-scrollbar-thumb {
     background-color: var(--border);
-    border-radius: 3px;
+    border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background-color: #D1D5DB;
+    background-color: #C7C7C7;
 }
 """
 
@@ -854,7 +862,6 @@ def check_kegg_status() -> dict:
 
 
 @st.cache_resource(ttl=300)
-@st.cache_resource(ttl=300)
 def check_pdb_status() -> dict:
     try:
         r = requests.post(
@@ -877,8 +884,6 @@ def check_pdb_status() -> dict:
             },
             timeout=15
         )
-        # Health check: ถาได response กลบมา = server reachable
-        # ไม ใช raise_for_status() เพราะ 400/422 หมายถง server ทำงาน
         data = r.json()
         if "result_set" in data:
             return {
@@ -913,12 +918,12 @@ def render_sidebar_status():
     kegg = check_kegg_status()
     pdb = check_pdb_status()
 
-def dot(status):
-    return {
-        "active": "active",
-        "warning": "warning",
-        "inactive": "inactive"
-    }.get(status, "inactive")
+    def dot(status):
+        return {
+            "active": "active",
+            "warning": "warning",
+            "inactive": "inactive"
+        }.get(status, "inactive")
 
     st.markdown(
         f'<div class="status-block">'
@@ -1932,7 +1937,7 @@ def kegg_fetcher(query: str):
     try:
         with st.spinner("กำลังสืบค้นข้อมูลวิถีเมแทบอลิซึมจาก KEGG..."):
             response = requests.get(
-                "https://rest.kegg.jp/find/genes",
+                "[https://rest.kegg.jp/find/genes](https://rest.kegg.jp/find/genes)",
                 params={"term": query},
                 timeout=API_TIMEOUT_SECONDS,
             )
@@ -1942,7 +1947,7 @@ def kegg_fetcher(query: str):
                 return {"status": "ไม่พบข้อมูลในระบบ KEGG", "query": query}
             gene_id = matches[0][0]
             link_response = requests.get(
-                f"https://rest.kegg.jp/link/pathway/{gene_id}",
+                f"[https://rest.kegg.jp/link/pathway/](https://rest.kegg.jp/link/pathway/){gene_id}",
                 timeout=API_TIMEOUT_SECONDS,
             )
             link_response.raise_for_status()
@@ -1956,7 +1961,7 @@ def pdb_fetcher(query: str):
     try:
         with st.spinner("กำลังสืบค้นโครงสร้างโปรตีนจาก RCSB PDB..."):
             response = requests.post(
-                "https://search.rcsb.org/rcsbsearch/v2/query",
+                "[https://search.rcsb.org/rcsbsearch/v2/query](https://search.rcsb.org/rcsbsearch/v2/query)",
                 json={
                     "query": {"type": "terminal", "service": "full_text", "parameters": {"value": query}},
                     "return_type": "entry",
@@ -1971,7 +1976,7 @@ def pdb_fetcher(query: str):
             entries = []
             for pdb_id in identifiers:
                 entry_response = requests.get(
-                    f"https://data.rcsb.org/rest/v1/core/entry/{pdb_id}",
+                    f"[https://data.rcsb.org/rest/v1/core/entry/](https://data.rcsb.org/rest/v1/core/entry/){pdb_id}",
                     timeout=API_TIMEOUT_SECONDS,
                 )
                 entry_response.raise_for_status()
@@ -2065,11 +2070,9 @@ def analyze_bio_context_with_attachments(metrics, attachments, query):
 # Bioinformatics UI — Professional Scientific Layout (PART 1, 3-10)
 # =============================================================================
 def render_bioinformatics():
-    # Main Header — no emoji, no link/anchor, reduced top spacing
     st.markdown("### Bioinformatics Analysis Agent", unsafe_allow_html=True)
     st.caption("วิเคราะห์ข้อมูลเชิงปริมาณด้วย Biopython และสังเคราะห์ผลด้วย AI")
 
-    # Input method
     input_method = st.selectbox(
         "Sequence Input",
         ["อัปโหลดไฟล์ (File Upload)", "ระบุข้อความ (Raw Text Input)", "ระบุรหัสอ้างอิง (NCBI Accession)"],
@@ -2106,7 +2109,6 @@ def render_bioinformatics():
 
     analysis_submitted = st.button("ประมวลผลและสร้างรายงานวิชาการ", type="primary")
 
-    # Initialize pipeline and log
     pipeline_states = {step: "pending" for step in PIPELINE_STEPS}
     analysis_log = AnalysisLog()
 
@@ -2118,7 +2120,6 @@ def render_bioinformatics():
             if input_method == "อัปโหลดไฟล์ (File Upload)":
                 if uploaded_file is None:
                     raise ValueError("กรุณาเลือกไฟล์แนบที่ต้องการอัปโหลด")
-                # File validation (PART 16)
                 valid, err, detected_fmt = validate_uploaded_file(uploaded_file)
                 if not valid:
                     raise ValueError(err)
@@ -2137,7 +2138,6 @@ def render_bioinformatics():
             pipeline_states["Input Validation"] = "done"
             analysis_log.log("Input validation completed")
 
-            # Sequence Validation (PART 3)
             validation = validate_sequence(sequence, sequence_id, input_method)
             st.session_state.bio_validation = validation
             pipeline_states["Sequence Analysis"] = "done"
@@ -2155,15 +2155,12 @@ def render_bioinformatics():
     if not metrics:
         return
 
-    # Display Validation (PART 3)
     validation = st.session_state.get("bio_validation")
     if validation:
         render_validation(validation)
 
-    # Display Pipeline (PART 8)
     render_pipeline(pipeline_states)
 
-    # Computational Results (PART 4 - Section 1)
     st.markdown("#### 1. Computational Results")
     st.caption(f"Sequence ID: {st.session_state.get('bio_sequence_id', 'N/A')}")
 
@@ -2179,7 +2176,6 @@ def render_bioinformatics():
         st.warning("ระบบตรวจพบว่ายังไม่มีข้อมูล GOOGLE_API_KEY ซึ่งจำเป็นต่อกระบวนการวิเคราะห์ผลขั้นสูงด้วย AI")
         return
 
-    # Database Retrieval + AI Interpretation (PART 4 - Sections 2-3)
     if analysis_submitted:
         pipeline_states["Database Retrieval"] = "active"
         analysis_log.log("Database retrieval started")
@@ -2215,7 +2211,6 @@ def render_bioinformatics():
         pipeline_states["AI Interpretation"] = "active"
         analysis_log.log("AI interpretation started")
 
-        # Build evidence dict for traceability (PART 5)
         evidence = {
             "ncbi": {
                 "accession": identification_data.get("accession"),
@@ -2274,25 +2269,20 @@ def render_bioinformatics():
             pipeline_states["AI Interpretation"] = "pending"
             analysis_log.log("AI interpretation failed", is_error=True)
 
-    # Display Results (PART 4 - structured)
     report = st.session_state.get("bio_report")
     if report:
         st.divider()
 
-        # Section 2: AI Interpretation
         st.markdown("#### 2. AI Interpretation")
         st.caption("ส่วนนี้เป็นการตีความโดย AI ไม่ใช่หลักฐานเชิงทดลอง (Experimental Evidence)")
         st.markdown(f'<div class="report-body">{report}</div>', unsafe_allow_html=True)
 
-        # Section 3: Evidence & Sources (PART 5)
         evidence = st.session_state.get("bio_evidence")
         if evidence:
             st.markdown("#### 3. Evidence & Sources")
             render_evidence_sources(evidence)
 
-        # Section 4: Confidence (PART 6)
         st.markdown("#### 4. AI Confidence")
-        # Extract confidence from report if available, else show placeholder
         st.markdown(
             '<div class="confidence-display">'
             '<span class="confidence-score">—</span>'
@@ -2305,11 +2295,9 @@ def render_bioinformatics():
             unsafe_allow_html=True,
         )
 
-        # Section 5: Limitations (PART 10)
         st.markdown("#### 5. Limitations")
         render_limitations()
 
-        # Analysis Metadata (PART 7)
         analysis_id = st.session_state.get("bio_analysis_id", "N/A")
         metadata = {
             "Analysis ID": analysis_id,
@@ -2323,11 +2311,9 @@ def render_bioinformatics():
         with st.expander("Analysis Metadata (Reproducibility)"):
             render_analysis_metadata(metadata)
 
-        # Analysis Log (PART 9)
         with st.expander("Analysis Log"):
             analysis_log.render()
 
-        # Download buttons
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
             st.download_button(
@@ -2355,7 +2341,6 @@ if "active_mode" not in st.session_state or st.session_state.active_mode not in 
 with st.sidebar:
     st.title("Bioinformatics AI")
 
-    # AI MODEL section
     st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-section-label">AI MODEL</div>', unsafe_allow_html=True)
     st.session_state.active_model_choice = st.selectbox(
@@ -2381,7 +2366,6 @@ with st.sidebar:
         if not st.session_state.active_model_key:
             st.warning(f"ระบบไม่พบข้อมูล {active_model_config['secret']} สำหรับการใช้งานโมเดลนี้")
 
-    # ANALYSIS MODE section
     st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-section-label">ANALYSIS MODE</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-section-desc">เลือกฟังก์ชันการใช้งาน</div>', unsafe_allow_html=True)
@@ -2393,7 +2377,6 @@ with st.sidebar:
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # STATUS section (PART 2)
     st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-section-label">STATUS</div>', unsafe_allow_html=True)
     render_sidebar_status()
