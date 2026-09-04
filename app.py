@@ -2339,8 +2339,9 @@ with st.sidebar:
     # ANALYSIS MODE section
     st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-section-label">ANALYSIS MODE</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-section-desc">เลือกฟังก์ชันการใช้งาน</div>', unsafe_allow_html=True)
     st.session_state.active_mode = st.radio(
-        "เลือกฟังก์ชันการใช้งาน",
+        "",
         MODE_OPTIONS,
         index=MODE_OPTIONS.index(st.session_state.active_mode),
         label_visibility="collapsed",
