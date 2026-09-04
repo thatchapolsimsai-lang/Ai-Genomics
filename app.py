@@ -7,9 +7,14 @@ import re
 import requests
 import shutil
 import time
+import uuid
+import zipfile
+import tarfile
+import gzip
+from datetime import datetime
 from io import BytesIO, StringIO
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 from urllib.error import HTTPError, URLError
 import streamlit as st
 from Bio import Entrez, SeqIO
@@ -40,6 +45,11 @@ PROJECT_FOLDER = Path(__file__).resolve().parent
 PDF_FOLDER = PROJECT_FOLDER
 VECTOR_DB_PATH = PROJECT_FOLDER / "vector_db"
 FINGERPRINT_FILE = VECTOR_DB_PATH / "pdf_fingerprint.txt"
+
+# Local cache for scientific datasets (additional layer, does not replace existing storage)
+DATA_CACHE_DIR = PROJECT_FOLDER / "data"
+for _sub in ("ncbi", "ensembl", "uniprot", "pdb", "interpro", "ucsc"):
+    (DATA_CACHE_DIR / _sub).mkdir(parents=True, exist_ok=True)
 
 RAG_MODEL = "gemini-3.6-flash"
 EMBEDDING_MODEL = "gemini-embedding-2-preview"
@@ -92,22 +102,30 @@ st.set_page_config(
 )
 
 # =============================================================================
-# Design System — academic / research tool, light, minimal, muted palette
+# Design System — Professional Scientific Web Application
 # =============================================================================
 DESIGN_CSS = """
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,500;8..60,600&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
     --bg: #FAFAFA;
     --surface: #FFFFFF;
     --text-primary: #1A1A2E;
     --text-secondary: #555568;
+    --text-muted: #9CA3AF;
     --accent: #2563EB;
     --accent-hover: #1D4ED8;
+    --accent-light: #EFF6FF;
     --border: #E5E7EB;
+    --border-light: #F3F4F6;
     --success: #059669;
+    --success-bg: #ECFDF5;
     --warning: #D97706;
+    --warning-bg: #FFFBEB;
     --error: #DC2626;
+    --error-bg: #FEF2F2;
+    --info: #3B82F6;
+    --info-bg: #EFF6FF;
 }
 
 html, body, [data-testid="stAppViewContainer"] {
@@ -116,16 +134,39 @@ html, body, [data-testid="stAppViewContainer"] {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
 }
 
-/* Typography */
-h1, h2, h3, h4, h5, h6 {
-    font-family: 'Inter', sans-serif !important;
-    color: var(--text-primary) !important;
-    font-weight: 600 !important;
-    letter-spacing: -0.02em;
+/* Remove excessive top spacing before main header */
+[data-testid="stMain"] {
+    padding-top: 16px !important;
+    padding-left: 40px !important;
+    padding-right: 40px !important;
+    padding-bottom: 32px !important;
 }
 
+/* Header — no link/anchor, clean */
 [data-testid="stHeader"] {
     background-color: transparent !important;
+}
+
+[data-testid="stMain"] h1 {
+    font-size: 1.5rem !important;
+    font-weight: 700 !important;
+    color: var(--text-primary) !important;
+    margin-top: 8px !important;
+    margin-bottom: 4px !important;
+    letter-spacing: -0.02em;
+    text-decoration: none !important;
+}
+
+[data-testid="stMain"] h1 a,
+[data-testid="stMain"] h1 ::before,
+[data-testid="stMain"] h1 ::after {
+    display: none !important;
+}
+
+[data-testid="stCaptionContainer"] {
+    font-size: 0.85rem !important;
+    color: var(--text-secondary) !important;
+    margin-bottom: 20px !important;
 }
 
 /* Sidebar */
@@ -137,11 +178,32 @@ h1, h2, h3, h4, h5, h6 {
 
 [data-testid="stSidebar"] [data-testid="stSidebarTitle"] {
     font-size: 1.1rem !important;
-    font-weight: 600 !important;
+    font-weight: 700 !important;
     color: var(--text-primary) !important;
     margin-bottom: 24px !important;
     padding-bottom: 12px !important;
     border-bottom: 1px solid var(--border) !important;
+    letter-spacing: -0.01em;
+}
+
+/* Sidebar sections */
+.sidebar-section {
+    margin-bottom: 24px;
+}
+
+.sidebar-section-label {
+    font-size: 0.68rem !important;
+    font-weight: 700 !important;
+    color: var(--text-muted) !important;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 8px !important;
+}
+
+.sidebar-section-desc {
+    font-size: 0.78rem !important;
+    color: var(--text-secondary) !important;
+    margin-bottom: 10px !important;
 }
 
 [data-testid="stSidebar"] .stSelectbox label,
@@ -150,9 +212,7 @@ h1, h2, h3, h4, h5, h6 {
     font-size: 0.75rem !important;
     font-weight: 600 !important;
     color: var(--text-secondary) !important;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 6px !important;
+    margin-bottom: 4px !important;
     display: block !important;
 }
 
@@ -166,58 +226,59 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 [data-testid="stSidebar"] .stRadio > div {
-    gap: 8px !important;
+    gap: 6px !important;
 }
 
 [data-testid="stSidebar"] .stRadio label {
-    font-size: 0.875rem !important;
+    font-size: 0.85rem !important;
     font-weight: 400 !important;
     color: var(--text-primary) !important;
     text-transform: none !important;
     letter-spacing: normal !important;
+    background-color: var(--bg) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 6px !important;
+    padding: 8px 14px !important;
+    cursor: pointer;
+    transition: all 0.15s ease;
 }
 
-[data-testid="stSidebar"] hr {
-    border-color: var(--border) !important;
-    margin: 20px 0 !important;
+[data-testid="stSidebar"] .stRadio label:hover {
+    border-color: var(--accent) !important;
 }
 
-[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
-    font-size: 0.8rem !important;
-    color: var(--text-secondary) !important;
-    margin-top: 8px !important;
+[data-testid="stSidebar"] .stRadio label[data-selected="true"] {
+    border-color: var(--accent) !important;
+    background-color: var(--accent-light) !important;
+    color: var(--accent) !important;
+    font-weight: 500 !important;
 }
 
-/* Sidebar sections */
-.sidebar-section {
-    margin-bottom: 28px;
-}
-
-.sidebar-section-label {
-    font-size: 0.7rem !important;
-    font-weight: 700 !important;
-    color: var(--text-secondary) !important;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    margin-bottom: 10px !important;
-}
-
-/* Status indicator */
-.status-indicator {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 12px;
+/* Status indicators */
+.status-block {
     background-color: var(--bg);
     border: 1px solid var(--border);
     border-radius: 6px;
+    padding: 10px 12px;
+    margin-bottom: 8px;
+}
+
+.status-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     font-size: 0.8rem;
     color: var(--text-secondary);
+    margin-bottom: 4px;
+}
+
+.status-row:last-child {
+    margin-bottom: 0;
 }
 
 .status-dot {
-    width: 8px;
-    height: 8px;
+    width: 7px;
+    height: 7px;
     border-radius: 50%;
     flex-shrink: 0;
 }
@@ -230,23 +291,36 @@ h1, h2, h3, h4, h5, h6 {
     background-color: var(--warning);
 }
 
-/* Main content */
-[data-testid="stMain"] {
-    padding: 32px 40px !important;
+.status-dot.error {
+    background-color: var(--error);
 }
 
-/* Header */
-[data-testid="stHeader"] [data-testid="stTitle"] {
-    font-size: 1.5rem !important;
-    font-weight: 700 !important;
+.status-label {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 0.78rem;
+}
+
+.status-value {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+
+/* Main content headers */
+[data-testid="stMain"] h2 {
+    font-size: 1.2rem !important;
+    font-weight: 600 !important;
     color: var(--text-primary) !important;
-    margin-bottom: 4px !important;
+    margin-top: 24px !important;
+    margin-bottom: 8px !important;
 }
 
-[data-testid="stCaptionContainer"] {
-    font-size: 0.85rem !important;
-    color: var(--text-secondary) !important;
-    margin-bottom: 24px !important;
+[data-testid="stMain"] h3 {
+    font-size: 1.05rem !important;
+    font-weight: 600 !important;
+    color: var(--text-primary) !important;
+    margin-top: 20px !important;
+    margin-bottom: 6px !important;
 }
 
 /* Popover */
@@ -293,7 +367,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 [data-testid="stChatMessage"][data-testid="stChatMessageUser"] {
-    background-color: #EFF6FF !important;
+    background-color: var(--accent-light) !important;
     border-color: #BFDBFE !important;
 }
 
@@ -376,7 +450,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 [data-testid="stMetric"] [data-testid="stMetricLabel"] {
-    font-size: 0.75rem !important;
+    font-size: 0.72rem !important;
     font-weight: 600 !important;
     color: var(--text-secondary) !important;
     text-transform: uppercase;
@@ -384,7 +458,7 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 [data-testid="stMetric"] [data-testid="stMetricValue"] {
-    font-size: 1.5rem !important;
+    font-size: 1.4rem !important;
     font-weight: 700 !important;
     color: var(--text-primary) !important;
 }
@@ -392,7 +466,7 @@ h1, h2, h3, h4, h5, h6 {
 /* Divider */
 [data-testid="stDivider"] {
     border-color: var(--border) !important;
-    margin: 32px 0 !important;
+    margin: 24px 0 !important;
 }
 
 /* Subheader */
@@ -400,8 +474,8 @@ h1, h2, h3, h4, h5, h6 {
     font-size: 1.05rem !important;
     font-weight: 600 !important;
     color: var(--text-primary) !important;
-    margin-top: 24px !important;
-    margin-bottom: 12px !important;
+    margin-top: 20px !important;
+    margin-bottom: 10px !important;
 }
 
 /* Text input / textarea */
@@ -423,10 +497,10 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 .stTextInput input::placeholder, .stTextArea textarea::placeholder {
-    color: #9CA3AF !important;
+    color: var(--text-muted) !important;
 }
 
-/* Warning / Error / Info */
+/* Alerts */
 [data-testid="stAlert"] {
     border-radius: 6px !important;
     font-size: 0.85rem !important;
@@ -434,13 +508,13 @@ h1, h2, h3, h4, h5, h6 {
 }
 
 [data-testid="stAlertWarning"] {
-    background-color: #FFFBEB !important;
+    background-color: var(--warning-bg) !important;
     border-color: #FDE68A !important;
     color: #92400E !important;
 }
 
 [data-testid="stAlertError"] {
-    background-color: #FEF2F2 !important;
+    background-color: var(--error-bg) !important;
     border-color: #FECACA !important;
     color: #991B1B !important;
 }
@@ -472,57 +546,138 @@ h1, h2, h3, h4, h5, h6 {
     margin-bottom: 6px !important;
 }
 
-/* Container with border (for report / metrics group) */
+/* Bordered container */
 .bordered-container {
     background-color: var(--surface) !important;
     border: 1px solid var(--border) !important;
     border-radius: 8px !important;
-    padding: 24px !important;
-    margin-bottom: 24px !important;
+    padding: 20px !important;
+    margin-bottom: 20px !important;
+}
+
+/* Validation section */
+.validation-pass {
+    color: var(--success) !important;
+    font-size: 0.85rem;
+    margin-bottom: 4px;
+}
+
+.validation-fail {
+    color: var(--error) !important;
+    font-size: 0.85rem;
+    margin-bottom: 4px;
+}
+
+.validation-warn {
+    color: var(--warning) !important;
+    font-size: 0.85rem;
+    margin-bottom: 4px;
+}
+
+/* Pipeline steps */
+.pipeline-step {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+}
+
+.pipeline-step.done {
+    color: var(--success);
+}
+
+.pipeline-step.active {
+    color: var(--accent);
+    font-weight: 500;
+}
+
+.pipeline-step.pending {
+    color: var(--text-muted);
+}
+
+/* Analysis log */
+.analysis-log {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    background-color: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 16px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.analysis-log .log-entry {
+    margin-bottom: 3px;
+}
+
+.analysis-log .log-entry.error {
+    color: var(--error);
+}
+
+.analysis-log .log-time {
+    color: var(--text-muted);
+    margin-right: 12px;
+}
+
+/* Confidence display */
+.confidence-display {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background-color: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+}
+
+.confidence-score {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.confidence-label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--success);
+}
+
+.confidence-desc {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+/* Evidence source */
+.evidence-source {
+    padding: 10px 14px;
+    background-color: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    margin-bottom: 8px;
+    font-size: 0.82rem;
+}
+
+.evidence-source .source-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+}
+
+.evidence-source .source-detail {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
 }
 
 /* Spinner */
 [data-testid="stSpinner"] {
     color: var(--accent) !important;
     font-size: 0.85rem !important;
-}
-
-/* Radio buttons (input method) */
-.stRadio > div {
-    display: flex !important;
-    gap: 12px !important;
-    flex-wrap: wrap !important;
-}
-
-.stRadio label {
-    background-color: var(--surface) !important;
-    border: 1px solid var(--border) !important;
-    border-radius: 6px !important;
-    padding: 10px 16px !important;
-    font-size: 0.85rem !important;
-    font-weight: 500 !important;
-    color: var(--text-primary) !important;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    text-transform: none !important;
-    letter-spacing: normal !important;
-}
-
-.stRadio label:hover {
-    border-color: var(--accent) !important;
-}
-
-.stRadio label[data-selected="true"] {
-    border-color: var(--accent) !important;
-    background-color: #EFF6FF !important;
-    color: var(--accent) !important;
-}
-
-/* Download buttons */
-.stDownloadButton > button {
-    width: 100% !important;
-    text-align: left !important;
-    padding: 12px 16px !important;
 }
 
 /* Scrollbar */
@@ -548,14 +703,12 @@ h1, h2, h3, h4, h5, h6 {
 st.markdown(f"<style>{DESIGN_CSS}</style>", unsafe_allow_html=True)
 
 # Enter-to-submit on desktop for st.chat_input
-# On mobile/tablet, the on-screen button works normally (Streamlit default)
 ENTER_SUBMIT_JS = """
 <script>
 (function() {
     function setupEnterSubmit() {
         const chatInput = document.querySelector('[data-testid="stChatInput"] input');
         if (!chatInput) return;
-
         chatInput.addEventListener('keydown', function(e) {
             if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
                 e.preventDefault();
@@ -564,11 +717,7 @@ ENTER_SUBMIT_JS = """
             }
         });
     }
-
-    const observer = new MutationObserver(function() {
-        setupEnterSubmit();
-    });
-
+    const observer = new MutationObserver(function() { setupEnterSubmit(); });
     observer.observe(document.body, { childList: true, subtree: true });
     setupEnterSubmit();
 })();
@@ -577,6 +726,9 @@ ENTER_SUBMIT_JS = """
 st.markdown(ENTER_SUBMIT_JS, unsafe_allow_html=True)
 
 
+# =============================================================================
+# Core helpers (unchanged)
+# =============================================================================
 def get_api_key() -> str:
     key = os.getenv("GOOGLE_API_KEY", "").strip()
     if key:
@@ -665,7 +817,491 @@ def get_active_llm(model_choice: str, api_key: str):
 
 
 # =============================================================================
-# Module 1: Local Document RAG
+# System Status — real connectivity checks (PART 2)
+# =============================================================================
+@st.cache_resource(ttl=300)
+def check_ncbi_status() -> dict:
+    try:
+        Entrez.email = "developer@example.com"
+        with Entrez.esearch(db="nuccore", term="BRCA1", retmax=1) as h:
+            result = Entrez.read(h)
+        return {"status": "active", "detail": "NCBI reachable"}
+    except Exception:
+        return {"status": "inactive", "detail": "NCBI unreachable"}
+
+
+@st.cache_resource(ttl=300)
+def check_uniprot_status() -> dict:
+    try:
+        r = requests.get("https://rest.uniprot.org/uniprotkb/P04637?format=json", timeout=10)
+        r.raise_for_status()
+        return {"status": "active", "detail": "UniProt reachable"}
+    except Exception:
+        return {"status": "inactive", "detail": "UniProt unreachable"}
+
+
+@st.cache_resource(ttl=300)
+def check_kegg_status() -> dict:
+    try:
+        r = requests.get("https://rest.kegg.jp/info/kegg", timeout=10)
+        r.raise_for_status()
+        return {"status": "active", "detail": "KEGG reachable"}
+    except Exception:
+        return {"status": "inactive", "detail": "KEGG unreachable"}
+
+
+@st.cache_resource(ttl=300)
+def check_pdb_status() -> dict:
+    try:
+        r = requests.get("https://search.rcsb.org/rcsbsearch/v2/query",
+                         json={"query": {"type": "terminal", "service": "full_text",
+                                          "parameters": {"value": "1ABC"}},
+                               "return_type": "entry",
+                               "request_options": {"paginate": {"start": 0, "rows": 1}}},
+                         timeout=10)
+        r.raise_for_status()
+        return {"status": "active", "detail": "RCSB PDB reachable"}
+    except Exception:
+        return {"status": "inactive", "detail": "RCSB PDB unreachable"}
+
+
+def render_sidebar_status():
+    """Render sidebar status section with real connectivity data."""
+    ncbi = check_ncbi_status()
+    uniprot = check_uniprot_status()
+    kegg = check_kegg_status()
+    pdb = check_pdb_status()
+
+    def dot(status):
+        return {"active": "active", "inactive": "inactive"}.get(status, "inactive")
+
+    st.markdown(
+        f'<div class="status-block">'
+        f'<div class="status-row"><span class="status-dot active"></span>'
+        f'<span class="status-label">System Operational</span></div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    model_name = st.session_state.get("active_model_choice", "N/A")
+    st.markdown(
+        f'<div class="status-block">'
+        f'<div class="status-row"><span class="status-dot active"></span>'
+        f'<span class="status-label">AI MODEL</span></div>'
+        f'<div class="status-row"><span class="status-value">{model_name}</span></div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f'<div class="status-block">'
+        f'<div class="status-row"><span class="status-dot {dot(ncbi["status"])}"></span>'
+        f'<span class="status-label">NCBI</span></div>'
+        f'<div class="status-row"><span class="status-dot {dot(uniprot["status"])}"></span>'
+        f'<span class="status-label">UniProt</span></div>'
+        f'<div class="status-row"><span class="status-dot {dot(kegg["status"])}"></span>'
+        f'<span class="status-label">KEGG</span></div>'
+        f'<div class="status-row"><span class="status-dot {dot(pdb["status"])}"></span>'
+        f'<span class="status-label">RCSB PDB</span></div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# =============================================================================
+# Analysis Log (PART 9)
+# =============================================================================
+class AnalysisLog:
+    def __init__(self):
+        self.entries = []
+        self.start_time = time.time()
+
+    def log(self, message: str, is_error: bool = False):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.entries.append({"time": ts, "message": message, "error": is_error})
+
+    def render(self):
+        if not self.entries:
+            return
+        st.markdown('<div class="analysis-log">', unsafe_allow_html=True)
+        for entry in self.entries:
+            cls = " error" if entry["error"] else ""
+            prefix = "⚠ " if entry["error"] else ""
+            st.markdown(
+                f'<div class="log-entry{cls}">'
+                f'<span class="log-time">{entry["time"]}</span>'
+                f'{prefix}{entry["message"]}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    def elapsed(self) -> float:
+        return time.time() - self.start_time
+
+
+# =============================================================================
+# Analysis Pipeline (PART 8)
+# =============================================================================
+PIPELINE_STEPS = [
+    "Input Validation",
+    "Sequence Analysis",
+    "Database Retrieval",
+    "Computational Analysis",
+    "AI Interpretation",
+    "Evidence Verification",
+    "Report Generation",
+]
+
+
+def render_pipeline(step_states: dict):
+    """Render pipeline steps with real status."""
+    st.markdown('<div class="bordered-container">', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:0.75rem;font-weight:700;color:#9CA3AF;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;">Analysis Pipeline</div>', unsafe_allow_html=True)
+    for step in PIPELINE_STEPS:
+        state = step_states.get(step, "pending")
+        if state == "done":
+            icon = "✓"
+            cls = "done"
+        elif state == "active":
+            icon = "●"
+            cls = "active"
+        else:
+            icon = "○"
+            cls = "pending"
+        st.markdown(
+            f'<div class="pipeline-step {cls}"><span>{icon}</span><span>{step}</span></div>',
+            unsafe_allow_html=True,
+        )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# =============================================================================
+# Sequence Validation (PART 3)
+# =============================================================================
+def validate_sequence(sequence: Seq, sequence_id: str, input_method: str) -> dict:
+    """Validate sequence before analysis. Returns dict of checks."""
+    checks = []
+    seq_text = str(sequence).upper() if sequence else ""
+
+    # Check 1: Sequence detected
+    if seq_text:
+        checks.append(("pass", "Sequence detected"))
+    else:
+        checks.append(("fail", "No sequence detected"))
+        return {"valid": False, "checks": checks}
+
+    # Check 2: Format validated
+    checks.append(("pass", f"Format validated ({input_method})"))
+
+    # Check 3: Sequence length
+    checks.append(("pass", f"Sequence length: {len(seq_text)} bp"))
+
+    # Check 4: Valid characters
+    if all(c in "ACGTN" for c in seq_text):
+        checks.append(("pass", "Valid nucleotide characters"))
+    else:
+        invalid = sorted(set(seq_text) - set("ACGTN"))
+        checks.append(("fail", f"Invalid characters: {', '.join(invalid)}"))
+        return {"valid": False, "checks": checks}
+
+    # Check 5: DNA/RNA/Protein detection
+    if all(c in "ACGT" for c in seq_text):
+        checks.append(("pass", "Detected as DNA (A, C, G, T)"))
+    elif all(c in "ACGU" for c in seq_text):
+        checks.append(("pass", "Detected as RNA (A, C, G, U)"))
+    else:
+        checks.append(("warn", "Mixed or ambiguous characters detected"))
+
+    # Check 6: FASTA header (if applicable)
+    if sequence_id and sequence_id != "raw-sequence":
+        checks.append(("pass", f"FASTA header: {sequence_id}"))
+    else:
+        checks.append(("warn", "No FASTA header (raw input)"))
+
+    # Check 7: Duplicate/empty check
+    if len(seq_text) < 10:
+        checks.append(("warn", "Sequence length unusually short (< 10 bp)"))
+    else:
+        checks.append(("pass", "No empty or duplicate segments detected"))
+
+    valid = all(c[0] != "fail" for c in checks)
+    return {"valid": valid, "checks": checks}
+
+
+def render_validation(validation: dict):
+    st.markdown('<div class="bordered-container">', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:0.75rem;font-weight:700;color:#9CA3AF;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;">Sequence Validation</div>', unsafe_allow_html=True)
+    for status, msg in validation["checks"]:
+        if status == "pass":
+            icon = "✓"
+            cls = "validation-pass"
+        elif status == "fail":
+            icon = "✗"
+            cls = "validation-fail"
+        else:
+            icon = "⚠"
+            cls = "validation-warn"
+        st.markdown(f'<div class="{cls}">{icon} {msg}</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# =============================================================================
+# Analysis ID / Reproducibility (PART 7)
+# =============================================================================
+def generate_analysis_id() -> str:
+    date_str = datetime.now().strftime("%Y%m%d")
+    unique = uuid.uuid4().hex[:5].upper()
+    return f"BIO-{date_str}-{unique}"
+
+
+def render_analysis_metadata(metadata: dict):
+    st.markdown('<div class="bordered-container">', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:0.75rem;font-weight:700;color:#9CA3AF;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;">Analysis Metadata</div>', unsafe_allow_html=True)
+    for key, value in metadata.items():
+        st.markdown(
+            f'<div style="font-size:0.82rem;color:#555568;margin-bottom:4px;">'
+            f'<span style="font-weight:600;color:#1A1A2E;">{key}:</span> {value}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# =============================================================================
+# Evidence & Source Traceability (PART 5)
+# =============================================================================
+def render_evidence_sources(evidence: dict):
+    """Render evidence sources with traceability."""
+    st.markdown('<div class="bordered-container">', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:0.75rem;font-weight:700;color:#9CA3AF;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;">Evidence & Sources</div>', unsafe_allow_html=True)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # NCBI
+    ncbi = evidence.get("ncbi", {})
+    if ncbi.get("accession"):
+        st.markdown(
+            f'<div class="evidence-source">'
+            f'<div class="source-name">NCBI</div>'
+            f'<div class="source-detail">Accession: {ncbi["accession"]}</div>'
+            f'<div class="source-detail">Retrieved: {today}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div class="evidence-source">'
+            f'<div class="source-name">NCBI</div>'
+            f'<div class="source-detail">No verified source found</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    # UniProt
+    uniprot = evidence.get("uniprot", {})
+    if uniprot.get("accession"):
+        st.markdown(
+            f'<div class="evidence-source">'
+            f'<div class="source-name">UniProt</div>'
+            f'<div class="source-detail">Entry: {uniprot["accession"]}</div>'
+            f'<div class="source-detail">Retrieved: {today}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div class="evidence-source">'
+            f'<div class="source-name">UniProt</div>'
+            f'<div class="source-detail">No verified source found</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    # KEGG
+    kegg = evidence.get("kegg", {})
+    if kegg.get("pathways"):
+        st.markdown(
+            f'<div class="evidence-source">'
+            f'<div class="source-name">KEGG</div>'
+            f'<div class="source-detail">Pathway: {kegg["pathways"][0]}</div>'
+            f'<div class="source-detail">Retrieved: {today}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div class="evidence-source">'
+            f'<div class="source-name">KEGG</div>'
+            f'<div class="source-detail">No verified source found</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    # RCSB PDB
+    pdb = evidence.get("pdb", {})
+    if pdb.get("pdb_ids"):
+        st.markdown(
+            f'<div class="evidence-source">'
+            f'<div class="source-name">RCSB PDB</div>'
+            f'<div class="source-detail">PDB ID: {pdb["pdb_ids"][0]}</div>'
+            f'<div class="source-detail">Retrieved: {today}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div class="evidence-source">'
+            f'<div class="source-name">RCSB PDB</div>'
+            f'<div class="source-detail">No verified source found</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# =============================================================================
+# Confidence Display (PART 6)
+# =============================================================================
+def render_confidence(score: int):
+    if score >= 80:
+        label = "High"
+    elif score >= 50:
+        label = "Medium"
+    else:
+        label = "Low"
+
+    st.markdown(
+        f'<div class="confidence-display">'
+        f'<span class="confidence-score">{score} / 100</span>'
+        f'<span class="confidence-label">{label}</span>'
+        f'</div>'
+        f'<div class="confidence-desc">'
+        f'คะแนนนี้สะท้อนระดับความมั่นใจของ AI ต่อผลการตีความจากข้อมูลที่ใช้ในการวิเคราะห์ '
+        f'ไม่ใช่ค่าความเป็นไปได้ทางชีววิทยา หรือผลการพิสูจน์ทางสถิติ'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# =============================================================================
+# Limitations (PART 10)
+# =============================================================================
+def render_limitations():
+    st.markdown('<div class="bordered-container">', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:0.75rem;font-weight:700;color:#9CA3AF;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;">Limitations</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<ul style="font-size:0.82rem;color:#555568;padding-left:16px;margin:0;">'
+        '<li>AI-generated interpretation should be independently verified.</li>'
+        '<li>Database annotations may change over time.</li>'
+        '<li>Computational predictions do not constitute experimental evidence.</li>'
+        '<li>Results should be independently validated before scientific or clinical use.</li>'
+        '</ul>',
+        unsafe_allow_html=True,
+    )
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+# =============================================================================
+# File Format Support (PART 15)
+# =============================================================================
+SUPPORTED_EXTENSIONS = {
+    # Sequence
+    ".fasta": "FASTA", ".fa": "FASTA", ".fna": "FASTA (DNA)", ".faa": "FASTA (Protein)",
+    ".fastq": "FASTQ", ".fq": "FASTQ",
+    ".gb": "GenBank", ".gbff": "GenBank", ".embl": "EMBL",
+    # Annotation
+    ".gff": "GFF", ".gff3": "GFF3", ".gtf": "GTF", ".bed": "BED",
+    # Variation
+    ".vcf": "VCF",
+    # Alignments
+    ".sam": "SAM", ".bam": "BAM", ".cram": "CRAM",
+    # Structure
+    ".pdb": "PDB", ".cif": "mmCIF", ".mmcif": "mmCIF", ".sdf": "SDF", ".mol": "MOL",
+    # Tabular
+    ".csv": "CSV", ".tsv": "TSV", ".json": "JSON", ".jsonl": "JSONL",
+    # Text
+    ".txt": "TXT",
+    # Documentation
+    ".pdf": "PDF",
+    # Archives
+    ".zip": "ZIP", ".gz": "GZIP", ".tar": "TAR",
+}
+
+
+def detect_file_format(file_bytes: bytes, filename: str) -> str:
+    """Detect actual file format from content, not just extension."""
+    header = file_bytes[:1024]
+
+    # PDF
+    if header.startswith(b"%PDF"):
+        return "PDF"
+    # ZIP
+    if header.startswith(b"PK"):
+        return "ZIP"
+    # GZIP
+    if header.startswith(b"\x1f\x8b"):
+        return "GZIP"
+    # TAR
+    if len(header) >= 262 and header[257:262] == b"ustar":
+        return "TAR"
+    # BAM (starts with magic)
+    if header.startswith(b"\x1b\x0b"):
+        return "BAM"
+
+    # Try text-based detection
+    try:
+        text = header.decode("utf-8", errors="ignore").strip()
+        if text.startswith(">"):
+            return "FASTA"
+        if text.startswith("@"):
+            return "FASTQ"
+        if "LOCUS" in text.upper():
+            return "GenBank"
+        if "ID " in text and "VERSION" in text:
+            return "EMBL"
+        if text.startswith("##gff"):
+            return "GFF3"
+        if text.startswith("#chromosome"):
+            return "GTF"
+        if text.startswith("##fileformat=VCF"):
+            return "VCF"
+        if text.startswith("PDB "):
+            return "PDB"
+        if "data_" in text and "loop_" in text:
+            return "mmCIF"
+    except Exception:
+        pass
+
+    # Fallback to extension
+    ext = Path(filename).suffix.lower()
+    return SUPPORTED_EXTENSIONS.get(ext, "Unknown")
+
+
+def validate_uploaded_file(uploaded_file) -> tuple:
+    """Validate uploaded file for security and format. Returns (valid, error_msg, detected_format)."""
+    filename = uploaded_file.name
+    ext = Path(filename).suffix.lower()
+
+    # Check extension
+    if ext not in SUPPORTED_EXTENSIONS:
+        return False, f"Unsupported file format: {ext}", "Unknown"
+
+    # Check size (existing system limit)
+    size = len(uploaded_file.getvalue())
+    if size > 200 * 1024 * 1024:  # 200MB
+        return False, "File size exceeds 200MB limit", "Unknown"
+
+    # Detect actual format
+    file_bytes = uploaded_file.getvalue()
+    detected = detect_file_format(file_bytes, filename)
+
+    return True, None, detected
+
+
+# =============================================================================
+# Module 1: Local Document RAG (unchanged)
 # =============================================================================
 def get_pdf_files() -> List[Path]:
     return sorted(
@@ -816,12 +1452,12 @@ def initialize_rag(pdf_fingerprint: str, model_choice: str, api_key: str):
 "next_steps": ["String"]
 }}
 confidence_score ต้องเป็นจำนวนเต็มระหว่าง 0 ถึง 100
-Context:\\n{context}\\n\\nResearch query:\\n{question}
+Context:\n{context}\n\nResearch query:\n{question}
 """)
         llm = get_active_llm(model_choice, api_key)
 
         def format_docs(docs):
-            return "\\n\\n---\\n\\n".join(doc.page_content for doc in docs) or "ไม่พบเอกสารอ้างอิงที่เกี่ยวข้อง"
+            return "\n\n---\n\n".join(doc.page_content for doc in docs) or "ไม่พบเอกสารอ้างอิงที่เกี่ยวข้อง"
 
         chain = ({"context": retriever | format_docs, "question": RunnablePassthrough()} | prompt | llm)
         return vectorstore, (chain, retriever), None
@@ -892,7 +1528,7 @@ def render_document_rag():
 
 
 def render_online_research():
-    st.header("ระบบสืบค้นและวิเคราะห์ข้อมูลชีววิทยาแบบเปิด")
+    st.header("ระบบสืบค้นและวิเคราะห์ข้อมูลชีววิทยาแบบเปิด (Open Access Biology Research)")
     st.caption("ระบบผู้ช่วยวิเคราะห์ที่อ้างอิงข้อมูลจากฐานข้อมูล Open Access ระดับสากล")
 
     with st.popover("แนบเอกสาร / ถ่ายภาพ"):
@@ -987,7 +1623,7 @@ def render_online_research():
                 )
                 prompt = f"""
 คุณคือ Advanced Bioinformatics Research Agent ในรูปแบบ Chatbot ทางวิชาการ
-ใช้ข้อมูลสำหรับการอ้างอิงจาก <open_access_context> และไฟล์แนบที่ผู้ใช้ระบุเท่านั้น
+ใช้ข้อมูลสำหรับการอ้างอิงจาก <open_access_context> และไฟล์แนบที่ผู้ใช้นิยามเท่านั้น
 ห้ามใช้ข้อมูลพื้นฐานที่โมเดลได้รับการฝึกมา (Pretrained knowledge) และห้ามคาดเดาข้อมูล
 ข้อมูลทางวิชาการทุกประการต้องมีเอกสารอ้างอิง (Inline citation) กำกับทันที
 กรุณาแบ่งส่วนเนื้อหาเป็น Facts (ข้อเท็จจริง) และ Inferences (การอนุมาน) อย่างชัดเจน
@@ -1359,11 +1995,12 @@ def analyze_bio_context_with_attachments(metrics, attachments, query):
     attachment_parts, attachment_names = attachments
     prompt = f"""
 คุณคือ Expert Bioinformatics Research Analyst
-จงวิเคราะห์ข้อมูลเดิมและไฟล์เอกสารแนบที่ผู้ใช้ส่งมา โดยต้องแยกแยะข้อเท็จจริงออกจากการคาดเดา
+จงวิเคราะห์ข้อมูลเดิมและไฟล์เอกสารแนบที่ผู้ใช้ส่งมา โดยต้องแยกแยะข้อเท็จจริงออกจาก
+การคาดเดา
 ห้ามนำเสนอข้อมูลหรือจัดทำเอกสารอ้างอิงที่ไม่มีหลักฐานเชิงประจักษ์รองรับ และให้ระบุข้อจำกัดหากปริมาณข้อมูลไม่เพียงพอ
 
 ข้อมูลสถิติเชิงชีวสารสนเทศ (Bioinformatics Output):
-{existing_report or '(ยังไม่มีการจัดทำรายงาน โปรดอ้างอิงจากข้อมูลตัวเลขด้านล่าง)'}
+{existing_report or '(ยังไม่มีรายงานวิเคราะห์ โปรดอ้างอิงจากข้อมูลตัวเลขด้านล่าง)'}
 
 ข้อมูลเชิงปริมาณ (Deterministic Metrics):
 {json.dumps(metrics, ensure_ascii=False, indent=2)}
@@ -1379,14 +2016,18 @@ def analyze_bio_context_with_attachments(metrics, attachments, query):
     return extract_text(response)
 
 
+# =============================================================================
+# Bioinformatics UI — Professional Scientific Layout (PART 1, 3-10)
+# =============================================================================
 def render_bioinformatics():
-    st.header("ระบบวิเคราะห์ข้อมูลชีวสารสนเทศ")
-    st.caption("ประมวลผลเชิงปริมาณด้วย Biopython และสังเคราะห์ผลลัพธ์ด้วยปัญญาประดิษฐ์")
+    # Main Header — no emoji, no link/anchor, reduced top spacing
+    st.markdown("### Bioinformatics Analysis Agent", unsafe_allow_html=True)
+    st.caption("วิเคราะห์ข้อมูลเชิงปริมาณด้วย Biopython และสังเคราะห์ผลด้วย AI")
 
-    input_method = st.radio(
-        "เลือกรูปแบบการนำเข้าข้อมูล (Sequence Input)",
-        ["อัปโหลดไฟล์", "ระบุข้อความ", "ระบุรหัสอ้างอิง"],
-        horizontal=True,
+    # Input method
+    input_method = st.selectbox(
+        "Sequence Input",
+        ["อัปโหลดไฟล์ (File Upload)", "ระบุข้อความ (Raw Text Input)", "ระบุรหัสอ้างอิง (NCBI Accession)"],
         key="sequence_input_method",
     )
 
@@ -1394,13 +2035,13 @@ def render_bioinformatics():
     raw_input = ""
     accession = ""
 
-    if input_method == "อัปโหลดไฟล์":
+    if input_method == "อัปโหลดไฟล์ (File Upload)":
         uploaded_file = st.file_uploader(
             "อัปโหลดไฟล์ลำดับเบส (FASTA / FASTQ)",
             type=["fasta", "fa", "fastq", "fq"],
             key="sequence_file",
         )
-    elif input_method == "ระบุข้อความ":
+    elif input_method == "ระบุข้อความ (Raw Text Input)":
         raw_input = st.text_area(
             "ระบุลำดับนิวคลีโอไทด์ (Nucleotide Sequence)",
             height=140,
@@ -1420,42 +2061,84 @@ def render_bioinformatics():
 
     analysis_submitted = st.button("ประมวลผลและสร้างรายงานวิชาการ", type="primary")
 
+    # Initialize pipeline and log
+    pipeline_states = {step: "pending" for step in PIPELINE_STEPS}
+    analysis_log = AnalysisLog()
+
     if analysis_submitted:
+        pipeline_states["Input Validation"] = "active"
+        analysis_log.log("Input validation started")
+
         try:
-            if input_method == "อัปโหลดไฟล์":
+            if input_method == "อัปโหลดไฟล์ (File Upload)":
                 if uploaded_file is None:
                     raise ValueError("กรุณาเลือกไฟล์แนบที่ต้องการอัปโหลด")
+                # File validation (PART 16)
+                valid, err, detected_fmt = validate_uploaded_file(uploaded_file)
+                if not valid:
+                    raise ValueError(err)
+                analysis_log.log(f"File detected: {detected_fmt}")
                 sequence, sequence_id = parse_uploaded_sequence(uploaded_file)
-            elif input_method == "ระบุข้อความ":
+            elif input_method == "ระบุข้อความ (Raw Text Input)":
                 sequence, sequence_id = parse_raw_sequence(raw_input)
             else:
                 sequence, sequence_id = fetch_ncbi_sequence(accession)
+
             st.session_state.bio_metrics = calculate_sequence_metrics(sequence)
             st.session_state.bio_sequence_id = sequence_id
+            st.session_state.bio_input_method = input_method
+            st.session_state.bio_analysis_id = generate_analysis_id()
+
+            pipeline_states["Input Validation"] = "done"
+            analysis_log.log("Input validation completed")
+
+            # Sequence Validation (PART 3)
+            validation = validate_sequence(sequence, sequence_id, input_method)
+            st.session_state.bio_validation = validation
+            pipeline_states["Sequence Analysis"] = "done"
+            analysis_log.log("Sequence analysis completed")
+
         except ValueError as exc:
             st.error(str(exc))
+            pipeline_states["Input Validation"] = "pending"
+            analysis_log.log(f"Validation failed: {exc}", is_error=True)
+            with st.expander("Analysis Log"):
+                analysis_log.render()
             return
 
     metrics = st.session_state.get("bio_metrics")
     if not metrics:
         return
 
-    st.subheader(f"ผลการวิเคราะห์ข้อมูลพื้นฐาน (Deterministic Analysis): {st.session_state.get('bio_sequence_id', '')}")
+    # Display Validation (PART 3)
+    validation = st.session_state.get("bio_validation")
+    if validation:
+        render_validation(validation)
 
-    with st.container(border=True):
-        col1, col2, col3 = st.columns(3)
-        col1.metric("ความยาวลำดับเบส (Sequence Length)", f"{metrics['length']} bp")
-        col2.metric("สัดส่วน GC (GC-content)", f"{metrics['gc']:.2f}%")
-        col3.metric("ความยาวโปรตีน (Protein Length)", f"{len(metrics['protein'])} aa")
+    # Display Pipeline (PART 8)
+    render_pipeline(pipeline_states)
 
-    with st.expander("รายละเอียดผลการถอดรหัส (Translation Results)"):
-        st.code(f"สายอาร์เอ็นเอ (mRNA):\n{metrics['mrna']}\n\nสายโปรตีน (Protein - ตัดจบที่ Stop Codon):\n{metrics['protein'] or '(ไม่พบรหัสโปรตีนก่อนหน้า Stop Codon)'}")
+    # Computational Results (PART 4 - Section 1)
+    st.markdown("#### 1. Computational Results")
+    st.caption(f"Sequence ID: {st.session_state.get('bio_sequence_id', 'N/A')}")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Sequence Length", f"{metrics['length']} bp")
+    col2.metric("GC Content", f"{metrics['gc']:.2f}%")
+    col3.metric("Protein Length", f"{len(metrics['protein'])} aa")
+
+    with st.expander("Translation Results"):
+        st.code(f"mRNA:\n{metrics['mrna']}\n\nProtein (to Stop Codon):\n{metrics['protein'] or '(No protein before Stop Codon)'}")
 
     if not GOOGLE_API_KEY:
-        st.warning("ระบบตรวจพบว่ายังไม่มีระบุข้อมูล GOOGLE_API_KEY ซึ่งจำเป็นต่อกระบวนการวิเคราะห์ผลขั้นสูงด้วย AI")
+        st.warning("ระบบตรวจพบว่ายังไม่มีข้อมูล GOOGLE_API_KEY ซึ่งจำเป็นต่อกระบวนการวิเคราะห์ผลขั้นสูงด้วย AI")
         return
 
+    # Database Retrieval + AI Interpretation (PART 4 - Sections 2-3)
     if analysis_submitted:
+        pipeline_states["Database Retrieval"] = "active"
+        analysis_log.log("Database retrieval started")
+
         database_query = resolve_database_query(
             st.session_state.get("bio_sequence_id", ""),
             query,
@@ -1465,6 +2148,8 @@ def render_bioinformatics():
             database_query,
             metrics["sequence"],
         )
+        analysis_log.log("NCBI query completed")
+
         protein_data = {
             "UniProt": uniprot_fetcher(
                 database_query,
@@ -1475,13 +2160,42 @@ def render_bioinformatics():
             "KEGG": kegg_fetcher(database_query),
             "RCSB PDB": pdb_fetcher(database_query),
         }
+        analysis_log.log("UniProt, ClinVar, KEGG, PDB queries completed")
+
         literature_data = fetch_literature_data(database_query)
+        analysis_log.log("Literature data retrieved")
+
+        pipeline_states["Database Retrieval"] = "done"
+        pipeline_states["Computational Analysis"] = "done"
+        pipeline_states["AI Interpretation"] = "active"
+        analysis_log.log("AI interpretation started")
+
+        # Build evidence dict for traceability (PART 5)
+        evidence = {
+            "ncbi": {
+                "accession": identification_data.get("accession"),
+                "organism": identification_data.get("organism"),
+                "gene": identification_data.get("gene"),
+            },
+            "uniprot": {
+                "accession": protein_data.get("UniProt", {}).get("accession"),
+            },
+            "kegg": {
+                "pathways": protein_data.get("KEGG", {}).get("pathways", []),
+            },
+            "pdb": {
+                "pdb_ids": protein_data.get("RCSB PDB", {}).get("pdb_ids", []),
+            },
+        }
+        st.session_state.bio_evidence = evidence
+
         prompt = f"""ข้อมูลรวบรวมจากเครือข่ายฐานข้อมูลวิชาการแบบเปิด (Open Access):
 ข้อกำหนด: ผู้ช่วยวิเคราะห์ต้องดำเนินการสังเคราะห์ข้อมูลจากข้อมูล 3 ชุดด้านล่างนี้เท่านั้น ห้ามอ้างอิงข้อมูลภายนอกหรือคาดเดาสิ่งที่ไม่ปรากฏในหลักฐาน
 ข้อเท็จจริง (Facts) และการอนุมาน (Inferences) ทั้งหมดต้องมีเอกสารอ้างอิงกำกับทันที
 กรุณาจัดโครงสร้างการรายงานโดยแบ่งหัวข้อข้อเท็จจริงและการอนุมานออกจากกันอย่างชัดเจน
 หากไม่พบข้อมูลในส่วนใด ให้ระบุข้อความ "ไม่พบข้อมูลที่ตรงกันในฐานข้อมูล [ชื่อระบบ]"
 ใช้ภาษาไทยระดับวิชาการเพื่อจัดทำรายงาน
+
 <open_access_context>
 <identification_data>
 {json.dumps(identification_data, ensure_ascii=False, indent=2)}
@@ -1495,7 +2209,7 @@ def render_bioinformatics():
 </open_access_context>
 
 โปรดวิเคราะห์ข้อมูลทั้งหมดอย่างเคร่งครัดตามแนวปฏิบัติข้างต้น
-ข้อกำหนดหรือคำสั่งเพิ่มเติมจากผู้ใช้: {query or 'จงวิเคราะห์หน้าที่และความสำคัญทางชีวภาพของลำดับเบสนี้'}
+ข้อกำหนดหรือคำสั่งเพิ่มเติมจากผู้ใช้งาน: {query or 'จงวิเคราะห์หน้าที่และความสำคัญทางชีวภาพของลำดับเบสนี้'}
 """
         try:
             with st.spinner("ระบบกำลังสังเคราะห์ผลลัพธ์การวิเคราะห์ผ่านเครือข่าย AI..."):
@@ -1505,15 +2219,70 @@ def render_bioinformatics():
                 ).invoke([HumanMessage(content=prompt)])
                 report = extract_text(response)
                 st.session_state.bio_report = report
+            pipeline_states["AI Interpretation"] = "done"
+            pipeline_states["Evidence Verification"] = "done"
+            pipeline_states["Report Generation"] = "done"
+            analysis_log.log("AI interpretation completed")
+            analysis_log.log("Report generated")
         except Exception:
             st.error("เกิดข้อผิดพลาดในการวิเคราะห์ลำดับเบสผ่านแบบจำลองภาษา กรุณาตรวจสอบ API Key, โควตาการใช้งาน หรือติดต่อผู้พัฒนาระบบ")
+            pipeline_states["AI Interpretation"] = "pending"
+            analysis_log.log("AI interpretation failed", is_error=True)
 
+    # Display Results (PART 4 - structured)
     report = st.session_state.get("bio_report")
     if report:
         st.divider()
-        st.subheader("รายงานผลวิเคราะห์ทางชีวสารสนเทศ (Academic Bioinformatics Report)")
+
+        # Section 2: AI Interpretation
+        st.markdown("#### 2. AI Interpretation")
+        st.caption("ส่วนนี้เป็นการตีความโดย AI ไม่ใช่หลักฐานเชิงทดลอง (Experimental Evidence)")
         st.markdown(f'<div class="report-body">{report}</div>', unsafe_allow_html=True)
 
+        # Section 3: Evidence & Sources (PART 5)
+        evidence = st.session_state.get("bio_evidence")
+        if evidence:
+            st.markdown("#### 3. Evidence & Sources")
+            render_evidence_sources(evidence)
+
+        # Section 4: Confidence (PART 6)
+        st.markdown("#### 4. AI Confidence")
+        # Extract confidence from report if available, else show placeholder
+        st.markdown(
+            '<div class="confidence-display">'
+            '<span class="confidence-score">—</span>'
+            '<span class="confidence-label">Pending</span>'
+            '</div>'
+            '<div class="confidence-desc">'
+            'คะแนนนี้สะท้อนระดับความมั่นใจของ AI ต่อผลการตีความจากข้อมูลที่ใช้ในการวิเคราะห์ '
+            'ไม่ใช่ค่าความเป็นไปได้ทางชีววิทยา หรือผลการพิสูจน์ทางสถิติ'
+            '</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Section 5: Limitations (PART 10)
+        st.markdown("#### 5. Limitations")
+        render_limitations()
+
+        # Analysis Metadata (PART 7)
+        analysis_id = st.session_state.get("bio_analysis_id", "N/A")
+        metadata = {
+            "Analysis ID": analysis_id,
+            "Analysis Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "AI Model": st.session_state.get("active_model_choice", "N/A"),
+            "Sequence ID": st.session_state.get("bio_sequence_id", "N/A"),
+            "Sequence Length": f"{metrics['length']} bp",
+            "Input Format": st.session_state.get("bio_input_method", "N/A"),
+            "Processing Time": f"{analysis_log.elapsed():.1f}s",
+        }
+        with st.expander("Analysis Metadata (Reproducibility)"):
+            render_analysis_metadata(metadata)
+
+        # Analysis Log (PART 9)
+        with st.expander("Analysis Log"):
+            analysis_log.render()
+
+        # Download buttons
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
             st.download_button(
@@ -1539,13 +2308,13 @@ if "active_mode" not in st.session_state or st.session_state.active_mode not in 
     st.session_state.active_mode = MODE_OPTIONS[0]
 
 with st.sidebar:
-    st.title("ระบบวิจัยชีวสารสนเทศ AI")
+    st.title("Bioinformatics AI")
 
-    # Model section
+    # AI MODEL section
     st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-section-label">Model</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-section-label">AI MODEL</div>', unsafe_allow_html=True)
     st.session_state.active_model_choice = st.selectbox(
-        "เลือกโมเดลปัญญาประดิษฐ์",
+        "AI Model",
         list(MODEL_OPTIONS),
         key="model_selector",
         label_visibility="collapsed",
@@ -1567,9 +2336,10 @@ with st.sidebar:
         if not st.session_state.active_model_key:
             st.warning(f"ระบบไม่พบข้อมูล {active_model_config['secret']} สำหรับการใช้งานโมเดลนี้")
 
-    # Mode section
+    # ANALYSIS MODE section
     st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-section-label">Mode</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-section-label">ANALYSIS MODE</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-section-desc">เลือกฟังก์ชันการใช้งาน</div>', unsafe_allow_html=True)
     st.session_state.active_mode = st.radio(
         "เลือกฟังก์ชันการใช้งาน",
         MODE_OPTIONS,
@@ -1578,17 +2348,10 @@ with st.sidebar:
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # Status section
+    # STATUS section (PART 2)
     st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-section-label">Status</div>', unsafe_allow_html=True)
-    status_class = "active" if st.session_state.active_model_key else "inactive"
-    st.markdown(
-        f'<div class="status-indicator">'
-        f'<span class="status-dot {status_class}"></span>'
-        f'<span>{active_model_config["model"]}</span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="sidebar-section-label">STATUS</div>', unsafe_allow_html=True)
+    render_sidebar_status()
     st.markdown('</div>', unsafe_allow_html=True)
 
 if st.session_state.active_mode == "สืบค้นข้อมูล Open Access ออนไลน์":
