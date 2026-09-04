@@ -864,52 +864,14 @@ def check_kegg_status() -> dict:
 @st.cache_resource(ttl=300)
 def check_pdb_status() -> dict:
     try:
-        r = requests.post(
-            "https://search.rcsb.org/rcsbsearch/v2/query",
-            json={
-                "query": {
-                    "type": "terminal",
-                    "service": "full_text",
-                    "parameters": {
-                        "value": "1ABC"
-                    }
-                },
-                "return_type": "entry",
-                "request_options": {
-                    "paginate": {
-                        "start": 0,
-                        "rows": 1
-                    }
-                }
-            },
-            timeout=15
-        )
-        data = r.json()
-        if "result_set" in data:
-            return {
-                "status": "active",
-                "detail": "RCSB PDB reachable"
-            }
-        return {
-            "status": "warning",
-            "detail": "RCSB PDB responded but returned unexpected data"
-        }
+        # ใช้ Data API (GET) ตามคู่มือในภาพ โดยลองดึงข้อมูลของรหัส 4HHB
+        r = requests.get("https://data.rcsb.org/rest/v1/core/entry/4HHB", timeout=10)
+        r.raise_for_status()
+        return {"status": "active", "detail": "RCSB PDB (Data API) reachable"}
     except requests.exceptions.Timeout:
-        return {
-            "status": "warning",
-            "detail": "RCSB PDB connection timeout"
-        }
-    except requests.exceptions.RequestException as e:
-        return {
-            "status": "inactive",
-            "detail": f"RCSB PDB unreachable: {e}"
-        }
+        return {"status": "warning", "detail": "RCSB PDB connection timeout"}
     except Exception as e:
-        return {
-            "status": "inactive",
-            "detail": f"RCSB PDB check failed: {e}"
-        }
-
+        return {"status": "inactive", "detail": f"RCSB PDB unreachable: {e}"}
 
 def render_sidebar_status():
     """Render sidebar status section with real connectivity data."""
