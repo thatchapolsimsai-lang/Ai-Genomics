@@ -14,9 +14,9 @@ from typing import List
 from urllib.error import HTTPError, URLError
 import streamlit as st
 from Bio import Entrez, SeqIO
+from Bio.Blast import NCBIWWW, NCBIXML
 from Bio.Seq import Seq
 from docx import Document as WordDocument
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from pypdf import PdfReader
@@ -36,22 +36,23 @@ UNIPROT_ENTRY_ENDPOINT = "https://rest.uniprot.org/uniprotkb/{accession_id}?form
 UNIPROT_GENE_ENDPOINT = "https://rest.uniprot.org/uniprotkb/search?query=gene:{gene_name}&format=json"
 UNIPROT_ORGANISM_ENDPOINT = "https://rest.uniprot.org/uniprotkb/search?query=organism_id:{tax_id}&format=json"
 API_TIMEOUT_SECONDS = 20
+BLAST_TIMEOUT_SECONDS = 180
 
-# Model ids default to current, verified-real releases; override via env if a
-# newer version should be used without touching code.
-GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
-CLAUDE_MODEL_NAME = os.getenv("CLAUDE_MODEL_NAME", "claude-sonnet-5")
+# Model ids are configurable via env/secrets since they depend on whichever
+# account or reseller the deployment actually has credentials for.
+GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-3.6-flash")
+NINEARM_MODEL_NAME = os.getenv("NINEARM_MODEL_NAME", "claude-3.5-sonnet")
 
 MODEL_OPTIONS = {
-    "Gemini 2.5 Flash": {
+    "Gemini 3.6 Flash": {
         "provider": "google",
         "model": GEMINI_MODEL_NAME,
         "secret": "GOOGLE_API_KEY",
     },
-    "Claude Sonnet 5": {
-        "provider": "anthropic",
-        "model": CLAUDE_MODEL_NAME,
-        "secret": "ANTHROPIC_API_KEY",
+    "Claude 3.5 (9arm)": {
+        "provider": "9arm",
+        "model": NINEARM_MODEL_NAME,
+        "secret": "NINEARM_API_KEY",
     },
 }
 
@@ -768,8 +769,15 @@ def get_active_llm(model_choice: str, api_key: str):
 
     if config["provider"] == "google":
         return ChatGoogleGenerativeAI(model=config["model"], temperature=0.2, google_api_key=api_key)
-    if config["provider"] == "anthropic":
-        return ChatAnthropic(model=config["model"], temperature=0.2, api_key=api_key)
+    if config["provider"] == "9arm":
+        base_url = get_configured_key("NINEARM_BASE_URL")
+        if not base_url:
+            raise ValueError("ยังไม่ได้กำหนดค่า NINEARM_BASE_URL (URL ของผู้ให้บริการ Claude ที่ใช้งานอยู่) กรุณาติดต่อผู้พัฒนาระบบ")
+        try:
+            from langchain_openai import ChatOpenAI
+        except ImportError:
+            raise RuntimeError("ไม่พบไลบรารี langchain-openai สำหรับใช้งาน API กรุณาติดต่อผู้พัฒนาระบบ")
+        return ChatOpenAI(model=config["model"], temperature=0.2, api_key=api_key, base_url=base_url)
     raise ValueError(f"ไม่รองรับผู้ให้บริการโมเดลนี้: {config['provider']} กรุณาติดต่อผู้พัฒนาระบบ")
 
 def translate_query_to_english(query: str, model_choice: str, api_key: str) -> str:
@@ -804,7 +812,7 @@ def translate_query_to_english(query: str, model_choice: str, api_key: str) -> s
 @st.cache_resource(ttl=300)
 def check_ncbi_status() -> dict:
     try:
-        with Entrez.esearch(db="nuccore", term="BRCA1", retmax=1) as h:
+        with Entrez.esearch(db="nuccore", term="BRCA1", retmax=1, timeout=API_TIMEOUT_SECONDS) as h:
             result = Entrez.read(h)
         return {"status": "active", "detail": "NCBI reachable"}
     except Exception:
@@ -997,11 +1005,11 @@ def validate_sequence(sequence: Seq, sequence_id: str, input_method: str) -> dic
     else:
         checks.append(("warn", "Mixed or ambiguous characters detected"))
 
-    # Check 6: FASTA header (if applicable)
+    # Check 6: sequence header (if applicable)
     if sequence_id and sequence_id != "raw-sequence":
-        checks.append(("pass", f"FASTA header: {sequence_id}"))
+        checks.append(("pass", f"Sequence header: {sequence_id}"))
     else:
-        checks.append(("warn", "No FASTA header (raw input)"))
+        checks.append(("warn", "No sequence header (raw input)"))
 
     # Check 7: Duplicate/empty check
     if len(seq_text) < 10:
@@ -1420,10 +1428,60 @@ def render_chat_sidebar() -> None:
 # =============================================================================
 # Literature search (Europe PMC + OpenAlex)
 # =============================================================================
-def fetch_online_open_access_context(query: str):
-    context = []
-    sources = []
+def _fetch_europe_pmc(search_query: str) -> list:
+    try:
+        response = requests.get(
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+            params={
+                "query": f"({search_query}) AND OPEN_ACCESS:Y",
+                "format": "json",
+                "resultType": "core",
+                "pageSize": ONLINE_RESULT_LIMIT,
+            },
+            timeout=ONLINE_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        results = []
+        for item in response.json().get("resultList", {}).get("result", []):
+            identifier = f"[PMID: {item.get('pmid')}]" if item.get('pmid') else f"[DOI: {item.get('doi', 'unknown')}]"
+            results.append({
+                "database": "Europe PMC",
+                "source": identifier,
+                "title": item.get("title", ""),
+                "journal": item.get("journalTitle", ""),
+                "abstract": item.get("abstractText", ""),
+                "year": item.get("pubYear", ""),
+            })
+        return results
+    except Exception as e:
+        return [{"source": "Europe PMC", "status": f"data unavailable: {type(e).__name__}: {e}"}]
 
+def _fetch_openalex(search_query: str) -> list:
+    try:
+        response = requests.get(
+            "https://api.openalex.org/works",
+            params={"search": search_query, "filter": "is_oa:true", "per-page": ONLINE_RESULT_LIMIT},
+            timeout=ONLINE_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        results = []
+        for item in response.json().get("results", []):
+            doi = item.get("doi") or item.get("ids", {}).get("openalex", "unknown")
+            identifier = f"[DOI: {doi.replace('https://doi.org/', '')}]" if doi else "[OpenAlex: unknown]"
+            results.append({
+                "database": "OpenAlex",
+                "source": identifier,
+                "title": item.get("title", ""),
+                "journal": item.get("primary_location", {}).get("source", {}).get("display_name", "") if item.get("primary_location") else "",
+                "year": item.get("publication_year", ""),
+                "open_access": item.get("open_access", {}),
+                "landing_page": item.get("primary_location", {}).get("landing_page_url", "") if item.get("primary_location") else "",
+            })
+        return results
+    except Exception as e:
+        return [{"source": "OpenAlex", "status": f"data unavailable: {type(e).__name__}: {e}"}]
+
+def fetch_online_open_access_context(query: str):
     search_query = translate_query_to_english(
         query,
         st.session_state.get("active_model_choice", ""),
@@ -1432,67 +1490,12 @@ def fetch_online_open_access_context(query: str):
     if not search_query:
         return [{"source": "Europe PMC / OpenAlex", "status": "empty query, search skipped"}], []
 
-    with st.spinner("กำลังสืบค้นบทความวิชาการ (Open Access) จาก Europe PMC..."):
-        try:
-            response = requests.get(
-                "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
-                params={
-                    "query": f"({search_query}) AND OPEN_ACCESS:Y",
-                    "format": "json",
-                    "resultType": "core",
-                    "pageSize": ONLINE_RESULT_LIMIT,
-                },
-                timeout=ONLINE_TIMEOUT_SECONDS,
-            )
-            response.raise_for_status()
-            for item in response.json().get("resultList", {}).get("result", []):
-                identifier = f"[PMID: {item.get('pmid')}]" if item.get('pmid') else f"[DOI: {item.get('doi', 'unknown')}]"
-                sources.append(identifier)
-                context.append({
-                    "database": "Europe PMC",
-                    "source": identifier,
-                    "title": item.get("title", ""),
-                    "journal": item.get("journalTitle", ""),
-                    "abstract": item.get("abstractText", ""),
-                    "year": item.get("pubYear", ""),
-                })
-        except Exception as e:
-            # แสดง error จริงๆ
-            context.append({
-                "source": "Europe PMC", 
-                "status": f"data unavailable: {type(e).__name__}: {e}"
-            })
-            st.warning(f"Europe PMC: {type(e).__name__}: {e}")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        europe_pmc_future = executor.submit(_fetch_europe_pmc, search_query)
+        openalex_future = executor.submit(_fetch_openalex, search_query)
+        context = europe_pmc_future.result() + openalex_future.result()
 
-    with st.spinner("กำลังสืบค้นข้อมูลวิชาการจาก OpenAlex..."):
-        try:
-            response = requests.get(
-                "https://api.openalex.org/works",
-                params={"search": search_query, "filter": "is_oa:true", "per-page": ONLINE_RESULT_LIMIT},
-                timeout=ONLINE_TIMEOUT_SECONDS,
-            )
-            response.raise_for_status()
-            for item in response.json().get("results", []):
-                doi = item.get("doi") or item.get("ids", {}).get("openalex", "unknown")
-                identifier = f"[DOI: {doi.replace('https://doi.org/', '')}]" if doi else "[OpenAlex: unknown]"
-                sources.append(identifier)
-                context.append({
-                    "database": "OpenAlex",
-                    "source": identifier,
-                    "title": item.get("title", ""),
-                    "journal": item.get("primary_location", {}).get("source", {}).get("display_name", "") if item.get("primary_location") else "",
-                    "year": item.get("publication_year", ""),
-                    "open_access": item.get("open_access", {}),
-                    "landing_page": item.get("primary_location", {}).get("landing_page_url", "") if item.get("primary_location") else "",
-                })
-        except Exception as e:
-            # แสดง error จริงๆ
-            context.append({
-                "source": "OpenAlex", 
-                "status": f"data unavailable: {type(e).__name__}: {e}"
-            })
-            st.warning(f"OpenAlex: {type(e).__name__}: {e}")
-
+    sources = [record["source"] for record in context if "status" not in record]
     return context, list(dict.fromkeys(sources))
 
 # =============================================================================
@@ -1537,6 +1540,9 @@ def render_online_research():
         with st.chat_message("assistant"):
             try:
                 context, sources = fetch_online_open_access_context(query)
+                for record in context:
+                    if record.get("status"):
+                        st.warning(f"{record.get('source', 'ฐานข้อมูล')}: {record['status']}")
                 available_records = [
                     record for record in context
                     if record.get("abstract") or record.get("title")
@@ -1653,6 +1659,7 @@ def fetch_ncbi_sequence(accession: str):
                 id=accession,
                 rettype="fasta",
                 retmode="text",
+                timeout=API_TIMEOUT_SECONDS,
             ) as handle:
                 record = SeqIO.read(handle, "fasta")
             return record.seq, record.id
@@ -1693,12 +1700,12 @@ def fetch_ncbi_identification(sequence_id: str, sequence: str):
         "tax_id": None,
     }
     try:
-        with Entrez.esearch(db="nuccore", term=sequence_id, retmax=1) as search_handle:
+        with Entrez.esearch(db="nuccore", term=sequence_id, retmax=1, timeout=API_TIMEOUT_SECONDS) as search_handle:
             search_result = Entrez.read(search_handle)
         identifiers = search_result.get("IdList", [])
         if not identifiers:
             return {"status": "ไม่พบข้อมูลระบุตัวตนในฐานข้อมูล NCBI", **result}
-        with Entrez.efetch(db="nuccore", id=identifiers[0], rettype="gb", retmode="text") as fetch_handle:
+        with Entrez.efetch(db="nuccore", id=identifiers[0], rettype="gb", retmode="text", timeout=API_TIMEOUT_SECONDS) as fetch_handle:
             record = SeqIO.read(fetch_handle, "genbank")
         result["accession"] = record.id or result["accession"]
         result["length"] = len(record.seq)
@@ -1716,6 +1723,41 @@ def fetch_ncbi_identification(sequence_id: str, sequence: str):
         return result
     except Exception as exc:
         return {"status": "ระบบไม่สามารถดึงข้อมูลระบุตัวตนจาก NCBI ได้", "error": str(exc), **result}
+
+def _run_blast_query(sequence: str):
+    result_handle = NCBIWWW.qblast("blastn", "nt", sequence, hitlist_size=1, expect=10)
+    try:
+        return NCBIXML.read(result_handle)
+    finally:
+        result_handle.close()
+
+def blast_identify_sequence(sequence: str) -> dict:
+    """Identify a sequence that has no direct database record by comparing
+    it against NCBI's nt database with BLAST. This is a real similarity
+    search rather than a text lookup, so it can identify raw sequencing
+    reads or unlabelled contigs -- but NCBI queues remote BLAST jobs, so a
+    single search can take anywhere from under a minute to several minutes.
+    Bounded by BLAST_TIMEOUT_SECONDS so it can never hang indefinitely."""
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            blast_record = executor.submit(_run_blast_query, sequence).result(timeout=BLAST_TIMEOUT_SECONDS)
+    except concurrent.futures.TimeoutError:
+        return {"status": f"การค้นหาด้วย BLAST ใช้เวลาเกิน {BLAST_TIMEOUT_SECONDS} วินาที กรุณาลองใหม่อีกครั้ง"}
+    except Exception as exc:
+        return {"status": f"การค้นหาด้วย BLAST ล้มเหลว: {exc}"}
+
+    if not blast_record.alignments:
+        return {"status": "ไม่พบลำดับที่คล้ายคลึงกันในฐานข้อมูล NCBI ด้วยวิธี BLAST"}
+
+    alignment = blast_record.alignments[0]
+    hsp = alignment.hsps[0]
+    identity_percent = (hsp.identities / hsp.align_length * 100) if hsp.align_length else None
+    return {
+        "accession": alignment.accession or alignment.hit_id,
+        "blast_hit_description": alignment.hit_def,
+        "e_value": hsp.expect,
+        "identity_percent": round(identity_percent, 2) if identity_percent is not None else None,
+    }
 
 def fetch_literature_data(query: str):
     records, _ = fetch_online_open_access_context(query)
@@ -1756,113 +1798,109 @@ def uniprot_fetch_by_organism(tax_id: str):
 
 def uniprot_fetcher(query: str, gene_name: str = "", tax_id: str = ""):
     try:
-        with st.spinner("กำลังสืบค้นข้อมูลโปรตีนจาก UniProt..."):
-            accession_match = re.fullmatch(
-                r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9][A-Z0-9]{3}[0-9])",
-                query.strip().upper(),
-            )
-            entry = uniprot_fetch_by_accession(query) if accession_match else None
-            if not entry:
-                entry = uniprot_fetch_by_gene(gene_name or query)
-            organism_entry = uniprot_fetch_by_organism(tax_id) if tax_id else None
-            if not entry and not organism_entry:
-                return {"status": "ไม่พบข้อมูลที่ตรงกันในระบบ UniProt", "query": query}
-            entry = entry or organism_entry
-            domains = [
-                feature.get("description", "")
-                for feature in entry.get("features", [])
-                if feature.get("type") in {"Domain", "Region"}
-            ]
-            locations = [
-                comment.get("texts", [{}])[0].get("value", "")
-                for comment in entry.get("comments", [])
-                if comment.get("commentType") == "SUBCELLULAR LOCATION"
-            ]
-            functions = [
-                text.get("value", "")
-                for comment in entry.get("comments", [])
-                if comment.get("commentType") == "FUNCTION"
-                for text in comment.get("texts", [])
-            ]
-            return {
-                "accession": entry.get("primaryAccession"),
-                "protein": entry.get("proteinDescription", {}).get("recommendedName", {}).get("fullName", {}).get("value"),
-                "function": functions,
-                "subcellular_location": locations,
-                "functional_domains": domains,
-            }
+        accession_match = re.fullmatch(
+            r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9][A-Z0-9]{3}[0-9])",
+            query.strip().upper(),
+        )
+        entry = uniprot_fetch_by_accession(query) if accession_match else None
+        if not entry:
+            entry = uniprot_fetch_by_gene(gene_name or query)
+        organism_entry = uniprot_fetch_by_organism(tax_id) if tax_id else None
+        if not entry and not organism_entry:
+            return {"status": "ไม่พบข้อมูลที่ตรงกันในระบบ UniProt", "query": query}
+        entry = entry or organism_entry
+        domains = [
+            feature.get("description", "")
+            for feature in entry.get("features", [])
+            if feature.get("type") in {"Domain", "Region"}
+        ]
+        locations = [
+            comment.get("texts", [{}])[0].get("value", "")
+            for comment in entry.get("comments", [])
+            if comment.get("commentType") == "SUBCELLULAR LOCATION"
+        ]
+        functions = [
+            text.get("value", "")
+            for comment in entry.get("comments", [])
+            if comment.get("commentType") == "FUNCTION"
+            for text in comment.get("texts", [])
+        ]
+        return {
+            "accession": entry.get("primaryAccession"),
+            "protein": entry.get("proteinDescription", {}).get("recommendedName", {}).get("fullName", {}).get("value"),
+            "function": functions,
+            "subcellular_location": locations,
+            "functional_domains": domains,
+        }
     except Exception as exc:
         return {"status": "เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล UniProt", "error": str(exc)}
 
 def clinvar_fetcher(query: str):
     try:
-        with st.spinner("กำลังสืบค้นข้อมูลความผิดปกติทางพันธุกรรมจาก ClinVar..."):
-            search_handle = Entrez.esearch(db="clinvar", term=query, retmax=5)
-            search_result = Entrez.read(search_handle)
-            search_handle.close()
-            identifiers = search_result.get("IdList", [])
-            if not identifiers:
-                return {"status": "ไม่พบข้อมูลในฐานข้อมูล ClinVar", "query": query}
-            fetch_handle = Entrez.efetch(db="clinvar", id=identifiers, rettype="vcv", retmode="xml")
-            raw_xml = fetch_handle.read()
-            fetch_handle.close()
-            return {"query": query, "record_ids": identifiers, "summary": str(raw_xml)[:12000]}
+        search_handle = Entrez.esearch(db="clinvar", term=query, retmax=5, timeout=API_TIMEOUT_SECONDS)
+        search_result = Entrez.read(search_handle)
+        search_handle.close()
+        identifiers = search_result.get("IdList", [])
+        if not identifiers:
+            return {"status": "ไม่พบข้อมูลในฐานข้อมูล ClinVar", "query": query}
+        fetch_handle = Entrez.efetch(db="clinvar", id=identifiers, rettype="vcv", retmode="xml", timeout=API_TIMEOUT_SECONDS)
+        raw_xml = fetch_handle.read()
+        fetch_handle.close()
+        return {"query": query, "record_ids": identifiers, "summary": str(raw_xml)[:12000]}
     except Exception as exc:
         return {"status": "เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล ClinVar", "error": str(exc)}
 
 def kegg_fetcher(query: str):
     try:
-        with st.spinner("กำลังสืบค้นข้อมูลวิถีเมแทบอลิซึมจาก KEGG..."):
-            response = requests.get(
-                "https://rest.kegg.jp/find/genes",
-                params={"term": query},
-                timeout=API_TIMEOUT_SECONDS,
-            )
-            response.raise_for_status()
-            matches = [line.split("\t", 1) for line in response.text.splitlines() if "\t" in line]
-            if not matches:
-                return {"status": "ไม่พบข้อมูลในระบบ KEGG", "query": query}
-            gene_id = matches[0][0]
-            link_response = requests.get(
-                f"https://rest.kegg.jp/link/pathway/{gene_id}",
-                timeout=API_TIMEOUT_SECONDS,
-            )
-            link_response.raise_for_status()
-            pathways = [line.split("\t", 1)[1] for line in link_response.text.splitlines() if "\t" in line]
-            return {"query": query, "gene_match": matches[0][1], "pathways": pathways}
+        response = requests.get(
+            "https://rest.kegg.jp/find/genes",
+            params={"term": query},
+            timeout=API_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        matches = [line.split("\t", 1) for line in response.text.splitlines() if "\t" in line]
+        if not matches:
+            return {"status": "ไม่พบข้อมูลในระบบ KEGG", "query": query}
+        gene_id = matches[0][0]
+        link_response = requests.get(
+            f"https://rest.kegg.jp/link/pathway/{gene_id}",
+            timeout=API_TIMEOUT_SECONDS,
+        )
+        link_response.raise_for_status()
+        pathways = [line.split("\t", 1)[1] for line in link_response.text.splitlines() if "\t" in line]
+        return {"query": query, "gene_match": matches[0][1], "pathways": pathways}
     except Exception as exc:
         return {"status": "เกิดข้อผิดพลาดในการเชื่อมต่อระบบ KEGG", "error": str(exc)}
 
 def pdb_fetcher(query: str):
     try:
-        with st.spinner("กำลังสืบค้นโครงสร้างโปรตีนจาก RCSB PDB..."):
-            response = requests.post(
-                "https://search.rcsb.org/rcsbsearch/v2/query",
-                json={
-                    "query": {"type": "terminal", "service": "full_text", "parameters": {"value": query}},
-                    "return_type": "entry",
-                    "request_options": {"paginate": {"start": 0, "rows": 5}},
-                },
+        response = requests.post(
+            "https://search.rcsb.org/rcsbsearch/v2/query",
+            json={
+                "query": {"type": "terminal", "service": "full_text", "parameters": {"value": query}},
+                "return_type": "entry",
+                "request_options": {"paginate": {"start": 0, "rows": 5}},
+            },
+            timeout=API_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        identifiers = [item.get("identifier") for item in response.json().get("result_set", [])]
+        if not identifiers:
+            return {"status": "ไม่พบข้อมูลโครงสร้างใน PDB", "query": query}
+        entries = []
+        for pdb_id in identifiers:
+            entry_response = requests.get(
+                f"https://data.rcsb.org/rest/v1/core/entry/{pdb_id}",
                 timeout=API_TIMEOUT_SECONDS,
             )
-            response.raise_for_status()
-            identifiers = [item.get("identifier") for item in response.json().get("result_set", [])]
-            if not identifiers:
-                return {"status": "ไม่พบข้อมูลโครงสร้างใน PDB", "query": query}
-            entries = []
-            for pdb_id in identifiers:
-                entry_response = requests.get(
-                    f"https://data.rcsb.org/rest/v1/core/entry/{pdb_id}",
-                    timeout=API_TIMEOUT_SECONDS,
-                )
-                entry_response.raise_for_status()
-                entry = entry_response.json().get("struct", {})
-                entries.append({
-                    "pdb_id": pdb_id,
-                    "title": entry.get("title", ""),
-                    "experimental_method": entry.get("pdbx_descriptor", ""),
-                })
-            return {"query": query, "pdb_ids": identifiers, "structural_summary": entries}
+            entry_response.raise_for_status()
+            entry = entry_response.json().get("struct", {})
+            entries.append({
+                "pdb_id": pdb_id,
+                "title": entry.get("title", ""),
+                "experimental_method": entry.get("pdbx_descriptor", ""),
+            })
+        return {"query": query, "pdb_ids": identifiers, "structural_summary": entries}
     except Exception as exc:
         return {"status": "เกิดข้อผิดพลาดในการเชื่อมต่อระบบ RCSB PDB", "error": str(exc)}
 
@@ -1975,6 +2013,16 @@ def render_bioinformatics():
         placeholder="ตัวอย่าง: จงวิเคราะห์หน้าที่ทางชีวภาพและบทบาททางพยาธิวิทยาของลำดับเบสนี้",
     )
 
+    use_blast = st.checkbox(
+        "ค้นหาด้วย BLAST หากไม่พบข้อมูลโดยตรงใน NCBI",
+        key="use_blast_fallback",
+        help=(
+            "สำหรับลำดับเบสที่ไม่มีรหัสอ้างอิงตรงกับฐานข้อมูล (เช่น read จากเครื่อง sequencer) "
+            "การค้นหาโดยตรงจะไม่พบข้อมูลเสมอ BLAST จะเทียบความคล้ายคลึงของลำดับเบสแทน "
+            "ซึ่งมีโอกาสระบุชนิดสิ่งมีชีวิตหรือยีนได้มากกว่า แต่ใช้เวลานานกว่ามาก (อาจถึงหลายนาที)"
+        ),
+    )
+
     analysis_submitted = st.button("ประมวลผลและสร้างรายงานวิชาการ", type="primary")
 
     pipeline_states = {step: "pending" for step in PIPELINE_STEPS}
@@ -2054,26 +2102,50 @@ def render_bioinformatics():
             query,
             metrics,
         )
-        identification_data = fetch_ncbi_identification(
-            database_query,
-            metrics["sequence"],
-        )
-        analysis_log.log("NCBI query completed")
+        # NCBI, ClinVar, KEGG, PDB, and literature lookups are independent of
+        # each other, so they run concurrently instead of one after another --
+        # sequentially, five ~10-30s-timeout network calls could take well
+        # over a minute before the AI step even starts.
+        with st.spinner("ระบบกำลังสืบค้นข้อมูลจากฐานข้อมูลชีวสารสนเทศหลายแห่งพร้อมกัน..."):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                identification_future = executor.submit(fetch_ncbi_identification, database_query, metrics["sequence"])
+                clinvar_future = executor.submit(clinvar_fetcher, database_query)
+                kegg_future = executor.submit(kegg_fetcher, database_query)
+                pdb_future = executor.submit(pdb_fetcher, database_query)
+                literature_future = executor.submit(fetch_literature_data, database_query)
 
-        protein_data = {
-            "UniProt": uniprot_fetcher(
+                identification_data = identification_future.result()
+                clinvar_result = clinvar_future.result()
+                kegg_result = kegg_future.result()
+                pdb_result = pdb_future.result()
+                literature_data = literature_future.result()
+            analysis_log.log("NCBI, ClinVar, KEGG, PDB, and literature queries completed")
+
+            uniprot_result = uniprot_fetcher(
                 database_query,
                 gene_name=identification_data.get("gene") or "",
                 tax_id=identification_data.get("tax_id") or "",
-            ),
-            "ClinVar": clinvar_fetcher(database_query),
-            "KEGG": kegg_fetcher(database_query),
-            "RCSB PDB": pdb_fetcher(database_query),
-        }
-        analysis_log.log("UniProt, ClinVar, KEGG, PDB queries completed")
+            )
+            analysis_log.log("UniProt query completed")
 
-        literature_data = fetch_literature_data(database_query)
-        analysis_log.log("Literature data retrieved")
+        protein_data = {
+            "UniProt": uniprot_result,
+            "ClinVar": clinvar_result,
+            "KEGG": kegg_result,
+            "RCSB PDB": pdb_result,
+        }
+
+        if use_blast and "status" in identification_data:
+            analysis_log.log("Direct NCBI lookup found nothing; starting BLAST search")
+            with st.spinner("กำลังค้นหาด้วย BLAST (อาจใช้เวลาหลายนาที กรุณารอสักครู่)..."):
+                blast_result = blast_identify_sequence(metrics["sequence"])
+            if "status" in blast_result:
+                analysis_log.log(f"BLAST search: {blast_result['status']}", is_error=True)
+                identification_data["blast_status"] = blast_result["status"]
+            else:
+                identification_data.pop("status", None)
+                identification_data.update(blast_result)
+                analysis_log.log("BLAST search found a matching sequence")
 
         pipeline_states["Database Retrieval"] = "done"
         pipeline_states["Computational Analysis"] = "done"
@@ -2082,7 +2154,10 @@ def render_bioinformatics():
 
         evidence = {
             "ncbi": {
-                "accession": identification_data.get("accession"),
+                # identification_data["accession"] falls back to echoing the
+                # search query when nothing was found; only surface it here
+                # as evidence when NCBI actually confirmed a record.
+                "accession": identification_data.get("accession") if "status" not in identification_data else None,
                 "organism": identification_data.get("organism"),
                 "gene": identification_data.get("gene"),
             },
