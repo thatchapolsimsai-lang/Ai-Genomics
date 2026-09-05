@@ -1,0 +1,4 @@
+[server]
+# Megabytes. Raised from Streamlit's 200MB default so real sequencing output
+# (FASTQ files in particular) can be uploaded directly.
+maxUploadSize = 1024
