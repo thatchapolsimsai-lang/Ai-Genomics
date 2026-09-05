@@ -5,4 +5,4 @@ python-docx
 pypdf
 langchain-core
 langchain-google-genai
-langchain-anthropic
+langchain-openai
