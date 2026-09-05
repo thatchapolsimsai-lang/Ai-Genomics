@@ -1637,9 +1637,13 @@ def parse_uploaded_sequence(uploaded_file):
     try:
         raw_bytes = uploaded_file.getvalue()
         filename = uploaded_file.name.lower()
-        if filename.endswith(".gz"):
+        # Detect gzip by content (magic number), not just the ".gz" suffix --
+        # a mislabeled or renamed file is still valid as long as it's really
+        # gzip-compressed underneath.
+        if raw_bytes[:2] == b"\x1f\x8b":
             raw_bytes = gzip.decompress(raw_bytes)
-            filename = filename[:-3]
+            if filename.endswith(".gz"):
+                filename = filename[:-3]
 
         content = raw_bytes.decode("utf-8")
         file_format = "fastq" if filename.endswith((".fastq", ".fq")) else "fasta"
