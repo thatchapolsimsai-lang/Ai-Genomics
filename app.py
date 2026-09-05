@@ -1496,10 +1496,7 @@ def fetch_online_open_access_context(query: str):
     if not search_query:
         return [{"source": "Europe PMC / OpenAlex", "status": "empty query, search skipped"}], []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        europe_pmc_future = executor.submit(_fetch_europe_pmc, search_query)
-        openalex_future = executor.submit(_fetch_openalex, search_query)
-        context = europe_pmc_future.result() + openalex_future.result()
+    context = _fetch_europe_pmc(search_query) + _fetch_openalex(search_query)
 
     sources = [record["source"] for record in context if "status" not in record]
     return context, list(dict.fromkeys(sources))
@@ -2117,31 +2114,22 @@ def render_bioinformatics():
             query,
             metrics,
         )
-        # NCBI, ClinVar, KEGG, PDB, and literature lookups are independent of
-        # each other, so they run concurrently instead of one after another --
-        # sequentially, five ~10-30s-timeout network calls could take well
-        # over a minute before the AI step even starts.
-        with st.spinner("ระบบกำลังสืบค้นข้อมูลจากฐานข้อมูลชีวสารสนเทศหลายแห่งพร้อมกัน..."):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                identification_future = executor.submit(fetch_ncbi_identification, database_query, metrics["sequence"])
-                clinvar_future = executor.submit(clinvar_fetcher, database_query)
-                kegg_future = executor.submit(kegg_fetcher, database_query)
-                pdb_future = executor.submit(pdb_fetcher, database_query)
-                literature_future = executor.submit(fetch_literature_data, database_query)
-
-                identification_data = identification_future.result()
-                clinvar_result = clinvar_future.result()
-                kegg_result = kegg_future.result()
-                pdb_result = pdb_future.result()
-                literature_data = literature_future.result()
-            analysis_log.log("NCBI, ClinVar, KEGG, PDB, and literature queries completed")
+        with st.spinner("ระบบกำลังสืบค้นข้อมูลจากฐานข้อมูลชีวสารสนเทศ..."):
+            identification_data = fetch_ncbi_identification(database_query, metrics["sequence"])
+            analysis_log.log("NCBI query completed")
 
             uniprot_result = uniprot_fetcher(
                 database_query,
                 gene_name=identification_data.get("gene") or "",
                 tax_id=identification_data.get("tax_id") or "",
             )
-            analysis_log.log("UniProt query completed")
+            clinvar_result = clinvar_fetcher(database_query)
+            kegg_result = kegg_fetcher(database_query)
+            pdb_result = pdb_fetcher(database_query)
+            analysis_log.log("UniProt, ClinVar, KEGG, PDB queries completed")
+
+            literature_data = fetch_literature_data(database_query)
+            analysis_log.log("Literature data retrieved")
 
         protein_data = {
             "UniProt": uniprot_result,
