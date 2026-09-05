@@ -9,7 +9,7 @@ import sqlite3
 import time
 import uuid
 from datetime import datetime
-from io import BytesIO, StringIO
+from io import BytesIO, TextIOWrapper
 from pathlib import Path
 from typing import List
 from urllib.error import HTTPError, URLError
@@ -1642,13 +1642,19 @@ def parse_uploaded_sequence(uploaded_file):
             if filename.endswith(".gz"):
                 filename = filename[:-3]
 
-        content = raw_bytes.decode("utf-8")
         file_format = "fastq" if filename.endswith((".fastq", ".fq")) else "fasta"
 
-        records = list(SeqIO.parse(StringIO(content), file_format))
-        if not records:
+        # Only the first record is ever used below -- a real FASTQ can hold
+        # millions of reads, and list(SeqIO.parse(...)) used to materialize
+        # every single one (plus a full decode of the whole file into one
+        # Python string) just to take records[0]. On a real sequencing file
+        # that reads as an out-of-memory kill with no Python traceback, not
+        # a normal exception. TextIOWrapper decodes incrementally, and
+        # next() stops at the first record instead of parsing the rest.
+        with TextIOWrapper(BytesIO(raw_bytes), encoding="utf-8") as text_stream:
+            record = next(SeqIO.parse(text_stream, file_format), None)
+        if record is None:
             raise ValueError("ระบบไม่พบข้อมูลลำดับเบส (Sequence) ในไฟล์ที่แนบมา กรุณาตรวจสอบไฟล์อีกครั้ง")
-        record = records[0]
     except Exception as exc:
         raise ValueError(f"รูปแบบไฟล์หรือข้อมูลภายในไม่ถูกต้อง: {exc} กรุณาติดต่อผู้พัฒนาระบบ") from exc
     return record.seq, record.id
