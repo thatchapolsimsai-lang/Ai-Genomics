@@ -46,7 +46,6 @@ PDF_FOLDER = PROJECT_FOLDER
 VECTOR_DB_PATH = PROJECT_FOLDER / "vector_db"
 FINGERPRINT_FILE = VECTOR_DB_PATH / "pdf_fingerprint.txt"
 
-# Local cache for scientific datasets (additional layer, does not replace existing storage)
 DATA_CACHE_DIR = PROJECT_FOLDER / "data"
 for _sub in ("ncbi", "ensembl", "uniprot", "pdb", "interpro", "ucsc"):
     (DATA_CACHE_DIR / _sub).mkdir(parents=True, exist_ok=True)
@@ -60,7 +59,7 @@ RETRIEVER_K = 5
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 150
 ONLINE_RESULT_LIMIT = 5
-ONLINE_TIMEOUT_SECONDS = 20
+ONLINE_TIMEOUT_SECONDS = 30  # เพิ่มจาก 20 → 30
 UNIPROT_ENTRY_ENDPOINT = "https://rest.uniprot.org/uniprotkb/{accession_id}?format=json"
 UNIPROT_GENE_ENDPOINT = "https://rest.uniprot.org/uniprotkb/search?query=gene:{gene_name}&format=json"
 UNIPROT_ORGANISM_ENDPOINT = "https://rest.uniprot.org/uniprotkb/search?query=organism_id:{tax_id}&format=json"
@@ -174,6 +173,7 @@ html, body, [data-testid="stAppViewContainer"] {
     background-color: var(--surface) !important;
     border-right: none !important;
     padding: 24px 20px !important;
+    margin-bottom: 20px !important;
 }
 
 [data-testid="stSidebar"] [data-testid="stSidebarTitle"] {
@@ -253,6 +253,7 @@ html, body, [data-testid="stAppViewContainer"] {
     color: var(--accent) !important;
     font-weight: 500 !important;
 }
+
 [data-testid="stSidebar"] .stRadio > label {
     display: none !important;
 }
@@ -289,9 +290,11 @@ html, body, [data-testid="stAppViewContainer"] {
 .status-dot.active {
     background-color: var(--success);
 }
+
 .status-dot.warning {
     background-color: var(--warning);
 }
+
 .status-dot.inactive {
     background-color: var(--error);
 }
@@ -388,6 +391,7 @@ html, body, [data-testid="stAppViewContainer"] {
     padding: 6px 12px !important;
     box-shadow: 0 2px 6px rgba(0,0,0,0.05) !important;
 }
+
 [data-testid="stChatInput"]:focus-within {
     border-color: var(--accent) !important;
     box-shadow: 0 2px 6px rgba(11, 87, 208, 0.1) !important;
@@ -736,9 +740,8 @@ ENTER_SUBMIT_JS = """
 """
 st.markdown(ENTER_SUBMIT_JS, unsafe_allow_html=True)
 
-
 # =============================================================================
-# Core helpers (unchanged)
+# Core helpers
 # =============================================================================
 def get_api_key() -> str:
     key = os.getenv("GOOGLE_API_KEY", "").strip()
@@ -749,16 +752,13 @@ def get_api_key() -> str:
     except Exception:
         return ""
 
-
 GOOGLE_API_KEY = get_api_key()
 if GOOGLE_API_KEY:
     os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
-
 def is_rate_limit_error(exc: Exception) -> bool:
     text = str(exc).upper()
     return any(item in text for item in ("429", "RESOURCE_EXHAUSTED", "QUOTA", "RATE LIMIT"))
-
 
 def extract_text(response) -> str:
     content = getattr(response, "content", response)
@@ -774,14 +774,12 @@ def extract_text(response) -> str:
         return str(content.get("text", "")).strip()
     return ""
 
-
 def format_bytes(size: int) -> str:
     if size < 1024:
         return f"{size} B"
     if size < 1024 ** 2:
         return f"{size / 1024:.1f} KB"
     return f"{size / (1024 ** 2):.1f} MB"
-
 
 def get_configured_key(key_name: str) -> str:
     key = os.getenv(key_name, "").strip()
@@ -792,11 +790,9 @@ def get_configured_key(key_name: str) -> str:
     except Exception:
         return ""
 
-
 NCBI_API_KEY = get_configured_key("NCBI_API_KEY")
 if NCBI_API_KEY:
     Entrez.api_key = NCBI_API_KEY
-
 
 def get_active_llm(model_choice: str, api_key: str):
     config = MODEL_OPTIONS.get(model_choice)
@@ -822,13 +818,25 @@ def get_active_llm(model_choice: str, api_key: str):
         if ChatGroq is None:
             raise RuntimeError("ไม่พบไลบรารี langchain-groq กรุณาติดต่อผู้พัฒนาระบบ")
         return ChatGroq(model=config["model"], temperature=0.2, groq_api_key=api_key)
-    if ChatNVIDIA is None:
-        raise RuntimeError("ไม่พบไลบรารี langchain-nvidia-ai-endpoints กรุณาติดต่อผู้พัฒนาระบบ")
-    return ChatNVIDIA(model=config["model"], temperature=0.2, api_key=api_key)
-
+    if config["provider"] == "nvidia":
+        if ChatNVIDIA is None:
+            raise RuntimeError("ไม่พบไลบรารี langchain-nvidia-ai-endpoints กรุณาติดต่อผู้พัฒนาระบบ")
+        return ChatNVIDIA(model=config["model"], temperature=0.2, api_key=api_key)
 
 # =============================================================================
-# System Status — real connectivity checks (PART 2)
+# NEW: Convert Thai query to English for Open Access search
+# =============================================================================
+def to_english_query(query: str) -> str:
+    """แปลง query ไทยเป็นคำค้นหาภาษาอังกฤส"""
+    # ลบอักษรไทย
+    query_en = re.sub(r'[^\x00-\x7F]+', '', query).strip()
+    if query_en:
+        return query_en
+    # ถ้าไม่มีอักษรอังกฤษ ให้ใช้คำค้นหาพื้่นฐาน
+    return "biological research"
+
+# =============================================================================
+# System Status — real connectivity checks
 # =============================================================================
 @st.cache_resource(ttl=300)
 def check_ncbi_status() -> dict:
@@ -840,7 +848,6 @@ def check_ncbi_status() -> dict:
     except Exception:
         return {"status": "inactive", "detail": "NCBI unreachable"}
 
-
 @st.cache_resource(ttl=300)
 def check_uniprot_status() -> dict:
     try:
@@ -849,7 +856,6 @@ def check_uniprot_status() -> dict:
         return {"status": "active", "detail": "UniProt reachable"}
     except Exception:
         return {"status": "inactive", "detail": "UniProt unreachable"}
-
 
 @st.cache_resource(ttl=300)
 def check_kegg_status() -> dict:
@@ -860,11 +866,9 @@ def check_kegg_status() -> dict:
     except Exception:
         return {"status": "inactive", "detail": "KEGG unreachable"}
 
-
 @st.cache_resource(ttl=300)
 def check_pdb_status() -> dict:
     try:
-        # ใช้ Data API (GET) ตามคู่มือในภาพ โดยลองดึงข้อมูลของรหัส 4HHB
         r = requests.get("https://data.rcsb.org/rest/v1/core/entry/4HHB", timeout=10)
         r.raise_for_status()
         return {"status": "active", "detail": "RCSB PDB (Data API) reachable"}
@@ -919,9 +923,8 @@ def render_sidebar_status():
         unsafe_allow_html=True,
     )
 
-
 # =============================================================================
-# Analysis Log (PART 9)
+# Analysis Log
 # =============================================================================
 class AnalysisLog:
     def __init__(self):
@@ -951,9 +954,8 @@ class AnalysisLog:
     def elapsed(self) -> float:
         return time.time() - self.start_time
 
-
 # =============================================================================
-# Analysis Pipeline (PART 8)
+# Analysis Pipeline
 # =============================================================================
 PIPELINE_STEPS = [
     "Input Validation",
@@ -964,7 +966,6 @@ PIPELINE_STEPS = [
     "Evidence Verification",
     "Report Generation",
 ]
-
 
 def render_pipeline(step_states: dict):
     """Render pipeline steps with real status."""
@@ -987,9 +988,8 @@ def render_pipeline(step_states: dict):
         )
     st.markdown('</div>', unsafe_allow_html=True)
 
-
 # =============================================================================
-# Sequence Validation (PART 3)
+# Sequence Validation
 # =============================================================================
 def validate_sequence(sequence: Seq, sequence_id: str, input_method: str) -> dict:
     """Validate sequence before analysis. Returns dict of checks."""
@@ -1040,7 +1040,6 @@ def validate_sequence(sequence: Seq, sequence_id: str, input_method: str) -> dic
     valid = all(c[0] != "fail" for c in checks)
     return {"valid": valid, "checks": checks}
 
-
 def render_validation(validation: dict):
     st.markdown('<div class="bordered-container">', unsafe_allow_html=True)
     st.markdown('<div style="font-size:0.75rem;font-weight:700;color:#9CA3AF;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:10px;">Sequence Validation</div>', unsafe_allow_html=True)
@@ -1057,15 +1056,13 @@ def render_validation(validation: dict):
         st.markdown(f'<div class="{cls}">{icon} {msg}</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-
 # =============================================================================
-# Analysis ID / Reproducibility (PART 7)
+# Analysis ID / Reproducibility
 # =============================================================================
 def generate_analysis_id() -> str:
     date_str = datetime.now().strftime("%Y%m%d")
     unique = uuid.uuid4().hex[:5].upper()
     return f"BIO-{date_str}-{unique}"
-
 
 def render_analysis_metadata(metadata: dict):
     st.markdown('<div class="bordered-container">', unsafe_allow_html=True)
@@ -1079,9 +1076,8 @@ def render_analysis_metadata(metadata: dict):
         )
     st.markdown('</div>', unsafe_allow_html=True)
 
-
 # =============================================================================
-# Evidence & Source Traceability (PART 5)
+# Evidence & Source Traceability
 # =============================================================================
 def render_evidence_sources(evidence: dict):
     """Render evidence sources with traceability."""
@@ -1172,9 +1168,8 @@ def render_evidence_sources(evidence: dict):
 
     st.markdown('</div>', unsafe_allow_html=True)
 
-
 # =============================================================================
-# Confidence Display (PART 6)
+# Confidence Display
 # =============================================================================
 def render_confidence(score: int):
     if score >= 80:
@@ -1196,9 +1191,8 @@ def render_confidence(score: int):
         unsafe_allow_html=True,
     )
 
-
 # =============================================================================
-# Limitations (PART 10)
+# Limitations
 # =============================================================================
 def render_limitations():
     st.markdown('<div class="bordered-container">', unsafe_allow_html=True)
@@ -1214,9 +1208,8 @@ def render_limitations():
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
-
 # =============================================================================
-# File Format Support (PART 15)
+# File Format Support
 # =============================================================================
 SUPPORTED_EXTENSIONS = {
     # Sequence
@@ -1240,7 +1233,6 @@ SUPPORTED_EXTENSIONS = {
     # Archives
     ".zip": "ZIP", ".gz": "GZIP", ".tar": "TAR",
 }
-
 
 def detect_file_format(file_bytes: bytes, filename: str) -> str:
     """Detect actual file format from content, not just extension."""
@@ -1290,7 +1282,6 @@ def detect_file_format(file_bytes: bytes, filename: str) -> str:
     ext = Path(filename).suffix.lower()
     return SUPPORTED_EXTENSIONS.get(ext, "Unknown")
 
-
 def validate_uploaded_file(uploaded_file) -> tuple:
     """Validate uploaded file for security and format. Returns (valid, error_msg, detected_format)."""
     filename = uploaded_file.name
@@ -1311,16 +1302,14 @@ def validate_uploaded_file(uploaded_file) -> tuple:
 
     return True, None, detected
 
-
 # =============================================================================
-# Module 1: Local Document RAG (unchanged)
+# Module 1: Local Document RAG
 # =============================================================================
 def get_pdf_files() -> List[Path]:
     return sorted(
         (path for path in PDF_FOLDER.iterdir() if path.is_file() and path.suffix.lower() == ".pdf"),
         key=lambda path: path.name.lower(),
     )
-
 
 def calculate_pdf_fingerprint(pdf_files: List[Path]) -> str:
     digest = hashlib.sha256()
@@ -1330,7 +1319,6 @@ def calculate_pdf_fingerprint(pdf_files: List[Path]) -> str:
         digest.update(f"{pdf_file.name}:{stat.st_size}:{stat.st_mtime_ns}".encode())
     return digest.hexdigest()
 
-
 def database_is_current(pdf_files: List[Path]) -> bool:
     if not VECTOR_DB_PATH.exists() or not FINGERPRINT_FILE.exists():
         return False
@@ -1338,7 +1326,6 @@ def database_is_current(pdf_files: List[Path]) -> bool:
         return FINGERPRINT_FILE.read_text(encoding="utf-8").strip() == calculate_pdf_fingerprint(pdf_files)
     except OSError:
         return False
-
 
 def remove_vector_database(max_attempts: int = 8) -> None:
     if not VECTOR_DB_PATH.exists():
@@ -1355,7 +1342,6 @@ def remove_vector_database(max_attempts: int = 8) -> None:
             if attempt < max_attempts - 1:
                 time.sleep(min(2.0, 0.25 * (attempt + 1)))
     raise PermissionError("ระบบฐานข้อมูลกำลังถูกใช้งานจากกระบวนการอื่น กรุณาปิดการเชื่อมต่อที่ค้างอยู่ หรือติดต่อผู้พัฒนาระบบ") from last_error
-
 
 def load_pdf_documents(pdf_files: List[Path]):
     documents, errors = [], []
@@ -1376,7 +1362,6 @@ def load_pdf_documents(pdf_files: List[Path]):
         except Exception as exc:
             errors.append(f"{pdf_file.name}: {exc}")
     return documents, errors
-
 
 class RateLimitedGeminiEmbeddings(Embeddings):
     def __init__(self, progress_callback=None):
@@ -1412,7 +1397,6 @@ class RateLimitedGeminiEmbeddings(Embeddings):
     def embed_query(self, text: str):
         return self._embed_with_retry([text])[0]
 
-
 def build_vector_database(pdf_files, embeddings, progress_callback=None):
     raw_documents, errors = load_pdf_documents(pdf_files)
     if not raw_documents:
@@ -1430,7 +1414,6 @@ def build_vector_database(pdf_files, embeddings, progress_callback=None):
     VECTOR_DB_PATH.mkdir(parents=True, exist_ok=True)
     FINGERPRINT_FILE.write_text(calculate_pdf_fingerprint(pdf_files), encoding="utf-8")
     return vectorstore, None
-
 
 @st.cache_resource
 def initialize_rag(pdf_fingerprint: str, model_choice: str, api_key: str):
@@ -1476,17 +1459,22 @@ Context:\n{context}\n\nResearch query:\n{question}
     except Exception as exc:
         return None, None, f"การเตรียมฐานข้อมูลล้มเหลว: {exc} กรุณาติดต่อผู้พัฒนาระบบ"
 
-
+# =============================================================================
+# FIXED: fetch_online_open_access_context with error display + English query
+# =============================================================================
 def fetch_online_open_access_context(query: str):
     context = []
     sources = []
+
+    # แปลง query เป็นอังกฤษก่อนส่ง
+    search_query = to_english_query(query)
 
     with st.spinner("กำลังสืบค้นบทความวิชาการ (Open Access) จาก Europe PMC..."):
         try:
             response = requests.get(
                 "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
                 params={
-                    "query": f"({query}) AND OPEN_ACCESS:Y",
+                    "query": f"({search_query}) AND OPEN_ACCESS:Y",
                     "format": "json",
                     "resultType": "core",
                     "pageSize": ONLINE_RESULT_LIMIT,
@@ -1505,14 +1493,19 @@ def fetch_online_open_access_context(query: str):
                     "abstract": item.get("abstractText", ""),
                     "year": item.get("pubYear", ""),
                 })
-        except Exception:
-            context.append({"source": "Europe PMC", "status": "data unavailable"})
+        except Exception as e:
+            # แสดง error จริงๆ
+            context.append({
+                "source": "Europe PMC", 
+                "status": f"data unavailable: {type(e).__name__}: {e}"
+            })
+            st.warning(f"Europe PMC: {type(e).__name__}: {e}")
 
     with st.spinner("กำลังสืบค้นข้อมูลวิชาการจาก OpenAlex..."):
         try:
             response = requests.get(
                 "https://api.openalex.org/works",
-                params={"search": query, "filter": "is_oa:true", "per-page": ONLINE_RESULT_LIMIT},
+                params={"search": search_query, "filter": "is_oa:true", "per-page": ONLINE_RESULT_LIMIT},
                 timeout=ONLINE_TIMEOUT_SECONDS,
             )
             response.raise_for_status()
@@ -1529,19 +1522,29 @@ def fetch_online_open_access_context(query: str):
                     "open_access": item.get("open_access", {}),
                     "landing_page": item.get("primary_location", {}).get("landing_page_url", "") if item.get("primary_location") else "",
                 })
-        except Exception:
-            context.append({"source": "OpenAlex", "status": "data unavailable"})
+        except Exception as e:
+            # แสดง error จริงๆ
+            context.append({
+                "source": "OpenAlex", 
+                "status": f"data unavailable: {type(e).__name__}: {e}"
+            })
+            st.warning(f"OpenAlex: {type(e).__name__}: {e}")
 
     return context, list(dict.fromkeys(sources))
 
-
+# =============================================================================
+# FIXED: render_online_research with unified chat input + history
+# =============================================================================
 def render_document_rag():
     render_online_research()
-
 
 def render_online_research():
     st.header("ระบบสืบค้นและวิเคราะห์ข้อมูลชีววิทยาแบบเปิด (Open Access Biology Research)")
     st.caption("ระบบผู้ช่วยวิเคราะห์ที่อ้างอิงข้อมูลจากฐานข้อมูล Open Access ระดับสากล")
+
+    # Initialize chat history
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
 
     with st.popover("แนบเอกสาร / ถ่ายภาพ"):
         attached_files = st.file_uploader(
@@ -1553,57 +1556,8 @@ def render_online_research():
         )
         camera_image = st.camera_input("ถ่ายภาพ", key="online_camera", label_visibility="collapsed")
 
-    bio_metrics = st.session_state.get("bio_metrics")
-    bio_report = st.session_state.get("bio_report", "")
-    if bio_metrics:
-        st.divider()
-        st.subheader("วิเคราะห์ผลสืบเนื่องจากส่วนชีวสารสนเทศ (Bioinformatics Integration)")
-        st.caption("อ้างอิงชุดข้อมูลอัตโนมัติจากผลการวิเคราะห์ก่อนหน้า")
-        bio_handoff_query = st.text_input(
-            "ระบุคำสั่งสำหรับการวิเคราะห์เพิ่มเติม",
-            placeholder="ตัวอย่าง: เปรียบเทียบลำดับเบสนี้กับข้อมูลสิ่งมีชีวิตอ้างอิงจาก Open Access",
-            key="online_bio_handoff_query",
-        )
-        if st.button("ดำเนินการวิเคราะห์เชิงลึก", key="online_analyze_bio_once"):
-            try:
-                attachment_content = build_attachment_content(attached_files, camera_image)
-                with st.spinner("กำลังประมวลผลข้อมูลและดึงข้อมูล Open Access..."):
-                    context, sources = fetch_online_open_access_context(
-                        bio_handoff_query or "วิเคราะห์หน้าที่และความสำคัญทางชีววิทยาของลำดับเบสนี้"
-                    )
-                    bio_context_prompt = f"""
-คุณคือ Advanced Bioinformatics Research Agent
-ใช้เฉพาะข้อมูลใน <open_access_context>, ผลวิเคราะห์ Bioinformatics เดิม
-และไฟล์แนบของผู้ใช้เท่านั้น ห้ามใช้ความรู้ภายในหรือคาดเดาข้อมูล
-แยกหมวดหมู่ Facts (ข้อเท็จจริง) และ Inferences (การอนุมาน) อย่างชัดเจน และต้องใส่ citation ต่อท้ายทุกการอ้างอิง
-
-ผลวิเคราะห์ Bioinformatics ก่อนหน้า:
-{bio_report or '(ไม่มีรายงานวิเคราะห์ก่อนหน้า)'}
-ข้อมูลทางสถิติ (Deterministic Metrics):
-{json.dumps(bio_metrics, ensure_ascii=False, indent=2)}
-<open_access_context>
-{json.dumps(context, ensure_ascii=False, indent=2)}
-</open_access_context>
-คำสั่ง: {bio_handoff_query or 'จงวิเคราะห์ความสัมพันธ์ของผลทางชีวสารสนเทศกับข้อมูลจากวรรณกรรมวิชาการ'}
-"""
-                    answer = extract_text(
-                        get_active_llm(
-                            st.session_state.active_model_choice,
-                            st.session_state.active_model_key,
-                        ).invoke([HumanMessage(content=[bio_context_prompt, *attachment_content[0]])])
-                    )
-                    st.session_state.online_bio_analysis = answer
-                    st.session_state.online_bio_sources = sources
-            except Exception:
-                st.error("เกิดข้อผิดพลาดในการวิเคราะห์ข้อมูลสืบเนื่อง กรุณาตรวจสอบการตั้งค่า API Key หรือติดต่อผู้พัฒนาระบบ")
-        if st.session_state.get("online_bio_analysis"):
-            st.markdown(st.session_state.online_bio_analysis)
-            with st.expander("รายการอ้างอิงจาก Open Access"):
-                for source in st.session_state.get("online_bio_sources", []):
-                    st.write(source)
-
-    messages = st.session_state.setdefault("online_chat_messages", [])
-    for message in messages:
+    # Show chat history
+    for message in st.session_state.chat_history:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if message.get("sources"):
@@ -1611,29 +1565,32 @@ def render_online_research():
                     for source in message["sources"]:
                         st.write(source)
 
+    # Unified chat input (no separate text_input)
     query = st.chat_input("พิมพ์คำถามเกี่ยวกับการวิจัยทางชีววิทยา หรือชีวสารสนเทศ...")
-    if not query:
-        return
+    
+    if query:
+        # Add user message to history
+        st.session_state.chat_history.append({"role": "user", "content": query})
+        
+        with st.chat_message("user"):
+            st.markdown(query)
 
-    messages.append({"role": "user", "content": query})
-    with st.chat_message("user"):
-        st.markdown(query)
-
-    with st.chat_message("assistant"):
-        try:
-            context, sources = fetch_online_open_access_context(query)
-            available_records = [
-                record for record in context
-                if record.get("abstract") or record.get("title")
-            ]
-            if not available_records:
-                answer = "ข้อมูลจากฐานข้อมูล Open Access ณ ปัจจุบัน ไม่เพียงพอต่อการวิเคราะห์เพื่อตอบคำถามดังกล่าว"
-            else:
-                attachment_parts, attachment_names = build_attachment_content(
-                    attached_files,
-                    camera_image,
-                )
-                prompt = f"""
+        with st.chat_message("assistant"):
+            try:
+                context, sources = fetch_online_open_access_context(query)
+                available_records = [
+                    record for record in context
+                    if record.get("abstract") or record.get("title")
+                ]
+                
+                if not available_records:
+                    answer = "ข้อมูลจากฐานข้อมูล Open Access ณ ปัจจุบัน ไม่เพียงพอต่อการวิเคราะห์เพื่อตอบคำถามดังกล่าว"
+                else:
+                    attachment_parts, attachment_names = build_attachment_content(
+                        attached_files,
+                        camera_image,
+                    )
+                    prompt = f"""
 คุณคือ Advanced Bioinformatics Research Agent ในรูปแบบ Chatbot ทางวิชาการ
 ใช้ข้อมูลสำหรับการอ้างอิงจาก <open_access_context> และไฟล์แนบที่ผู้ใช้นิยามเท่านั้น
 ห้ามใช้ข้อมูลพื้นฐานที่โมเดลได้รับการฝึกมา (Pretrained knowledge) และห้ามคาดเดาข้อมูล
@@ -1646,27 +1603,48 @@ def render_online_research():
 <open_access_context>
 {json.dumps(context, ensure_ascii=False, indent=2)}
 </open_access_context>
+
 ไฟล์แนบ (Attached files): {', '.join(attachment_names) or '(ไม่มี)'}
-คำถามจากผู้ใช้งาน (User query): {query}
+คำถามจากผู้ใช้ (User query): {query}
 """
-                with st.spinner("ระบบกำลังสืบค้นและประมวลผลข้อมูล..."):
-                    response = get_active_llm(
-                        st.session_state.active_model_choice,
-                        st.session_state.active_model_key,
-                    ).invoke([HumanMessage(content=[prompt, *attachment_parts])])
+                    with st.spinner("ระบบกำลังสืบค้นและประมวลผลข้อมูล..."):
+                        response = get_active_llm(
+                            st.session_state.active_model_choice,
+                            st.session_state.active_model_key,
+                        ).invoke([HumanMessage(content=[prompt, *attachment_parts])])
                     answer = extract_text(response).strip()
-            st.markdown(answer)
-            if sources:
-                with st.expander("รายการอ้างอิงจาก Open Access"):
-                    for source in sources:
-                        st.write(source)
-            messages.append({"role": "assistant", "content": answer, "sources": sources})
-        except Exception:
-            answer = "เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูลหรือประมวลผลโมเดล AI กรุณาตรวจสอบ API Key หรือติดต่อผู้พัฒนาระบบ"
-            st.error(answer)
-            messages.append({"role": "assistant", "content": answer, "sources": []})
+                
+                st.markdown(answer)
+                if sources:
+                    with st.expander("รายการอ้างอิงจาก Open Access"):
+                        for source in sources:
+                            st.write(source)
+                
+                # Add assistant message to history
+                st.session_state.chat_history.append({
+                    "role": "assistant", 
+                    "content": answer, 
+                    "sources": sources
+                })
+                
+            except Exception as e:
+                answer = f"เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูลหรือประมวลผลโมเดล AI: {type(e).__name__}: {e}"
+                st.error(answer)
+                st.session_state.chat_history.append({
+                    "role": "assistant", 
+                    "content": answer, 
+                    "sources": []
+                })
 
+    # Clear history button
+    if st.session_state.chat_history:
+        if st.button("🗑️ ล้างประวัติแชท", key="clear_chat_history"):
+            st.session_state.chat_history = []
+            st.rerun()
 
+# =============================================================================
+# Bioinformatics Pipeline
+# =============================================================================
 def parse_analysis_json(raw_response: str):
     cleaned = raw_response.strip()
     if cleaned.startswith("```"):
@@ -1686,7 +1664,6 @@ def parse_analysis_json(raw_response: str):
             raise ValueError(f"ข้อมูลส่วน '{field}' ต้องอยู่ในรูปแบบรายการ (List of Strings) กรุณาติดต่อผู้พัฒนาระบบ")
     return analysis
 
-
 # =============================================================================
 # Module 2: Biopython deterministic pipeline and Gemini agent
 # =============================================================================
@@ -1704,18 +1681,16 @@ def parse_uploaded_sequence(uploaded_file):
         raise ValueError(f"รูปแบบไฟล์หรือข้อมูลภายในไม่ถูกต้อง: {exc} กรุณาติดต่อผู้พัฒนาระบบ") from exc
     return record.seq, record.id
 
-
 def parse_raw_sequence(raw_input: str):
     sequence = re.sub(r"\s+", "", raw_input or "").upper()
     if not sequence:
         raise ValueError("กรุณาระบุลำดับนิวคลีโอไทด์ (Nucleotide Sequence) เพื่อดำเนินการต่อ")
     return Seq(sequence), "raw-sequence"
 
-
 def fetch_ncbi_sequence(accession: str):
     accession = accession.strip()
     if not accession:
-        raise ValueError("กรุณาระบุรหัสอ้างอิง (NCBI Accession Number) เพื่อดำเนินการค้นหา")
+        raise ValueError("กรุณาระบุรหัสอ้างอิง (NCBI Accession Number) เพื่อค้นหา")
 
     Entrez.email = "developer@example.com"
     try:
@@ -1727,7 +1702,7 @@ def fetch_ncbi_sequence(accession: str):
                 retmode="text",
             ) as handle:
                 record = SeqIO.read(handle, "fasta")
-                return record.seq, record.id
+            return record.seq, record.id
     except HTTPError as exc:
         raise ValueError(f"เซิร์ฟเวอร์ NCBI ปฏิเสธคำขอดึงข้อมูล ({exc.code}) กรุณาตรวจสอบรหัส Accession หรือติดต่อผู้พัฒนาระบบ") from exc
     except URLError as exc:
@@ -1735,18 +1710,16 @@ def fetch_ncbi_sequence(accession: str):
     except Exception as exc:
         raise ValueError(f"เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุระหว่างดึงข้อมูล: {exc} กรุณาติดต่อผู้พัฒนาระบบ") from exc
 
-
 def calculate_sequence_metrics(sequence: Seq):
     sequence_text = str(sequence).upper()
     invalid = sorted(set(sequence_text) - set("ACGTN"))
     if invalid:
-        raise ValueError(f"ตรวจพบอักขระที่ไม่ใช่ตัวอักษรนิวคลีโอไทด์มาตรฐาน: {', '.join(invalid)}")
+        raise ValueError(f"ตรวจพบอักษระที่ไม่ใช่อักษรนิวคลีโอไทด์มาตรฐาน: {', '.join(invalid)}")
     gc_count = sequence_text.count("G") + sequence_text.count("C")
     gc_content = gc_count / len(sequence_text) * 100 if sequence_text else 0.0
     mrna = sequence.transcribe()
     protein = mrna.translate(to_stop=True)
     return {"sequence": sequence_text, "length": len(sequence_text), "gc": gc_content, "mrna": str(mrna), "protein": str(protein)}
-
 
 def resolve_database_query(sequence_id: str, user_query: str, metrics: dict) -> str:
     if sequence_id and sequence_id != "raw-sequence":
@@ -1754,7 +1727,6 @@ def resolve_database_query(sequence_id: str, user_query: str, metrics: dict) -> 
     if user_query.strip():
         return user_query.strip()
     return metrics.get("protein", "").strip() or "nucleotide sequence"
-
 
 def fetch_ncbi_identification(sequence_id: str, sequence: str):
     result = {
@@ -1771,28 +1743,27 @@ def fetch_ncbi_identification(sequence_id: str, sequence: str):
         Entrez.email = "developer@example.com"
         with Entrez.esearch(db="nuccore", term=sequence_id, retmax=1) as search_handle:
             search_result = Entrez.read(search_handle)
-            identifiers = search_result.get("IdList", [])
-            if not identifiers:
-                return {"status": "ไม่พบข้อมูลระบุตัวตนในฐานข้อมูล NCBI", **result}
-            with Entrez.efetch(db="nuccore", id=identifiers[0], rettype="gb", retmode="text") as fetch_handle:
-                record = SeqIO.read(fetch_handle, "genbank")
-                result["accession"] = record.id or result["accession"]
-                result["length"] = len(record.seq)
-                result["organism"] = record.annotations.get("organism")
-                for dbxref in record.dbxrefs:
-                    if dbxref.startswith("taxon:"):
-                        result["tax_id"] = dbxref.split(":", 1)[1]
-                        break
-                for feature in record.features:
-                    if feature.type in {"gene", "CDS"}:
-                        qualifiers = feature.qualifiers
-                        result["gene"] = (qualifiers.get("gene") or qualifiers.get("locus_tag") or [None])[0]
-                        if result["gene"]:
-                            break
-                return result
+        identifiers = search_result.get("IdList", [])
+        if not identifiers:
+            return {"status": "ไม่พบข้อมูลระบุตัวตนในฐานข้อมูล NCBI", **result}
+        with Entrez.efetch(db="nuccore", id=identifiers[0], rettype="gb", retmode="text") as fetch_handle:
+            record = SeqIO.read(fetch_handle, "genbank")
+        result["accession"] = record.id or result["accession"]
+        result["length"] = len(record.seq)
+        result["organism"] = record.annotations.get("organism")
+        for dbxref in record.dbxrefs:
+            if dbxref.startswith("taxon:"):
+                result["tax_id"] = dbxref.split(":", 1)[1]
+                break
+        for feature in record.features:
+            if feature.type in {"gene", "CDS"}:
+                qualifiers = feature.qualifiers
+                result["gene"] = (qualifiers.get("gene") or qualifiers.get("locus_tag") or [None])[0]
+                if result["gene"]:
+                    break
+        return result
     except Exception as exc:
         return {"status": "ระบบไม่สามารถดึงข้อมูลระบุตัวตนจาก NCBI ได้", "error": str(exc), **result}
-
 
 def fetch_literature_data(query: str):
     records, _ = fetch_online_open_access_context(query)
@@ -1802,12 +1773,10 @@ def fetch_literature_data(query: str):
         and (record.get("abstract") or record.get("title"))
     ]
 
-
 def _uniprot_result(response):
     response.raise_for_status()
     payload = response.json()
     return payload.get("results", []) if "results" in payload else [payload]
-
 
 def uniprot_fetch_by_accession(accession_id: str):
     response = requests.get(
@@ -1817,7 +1786,6 @@ def uniprot_fetch_by_accession(accession_id: str):
     results = _uniprot_result(response)
     return results[0] if results else None
 
-
 def uniprot_fetch_by_gene(gene_name: str):
     response = requests.get(
         UNIPROT_GENE_ENDPOINT.format(gene_name=requests.utils.quote(gene_name.strip())),
@@ -1826,7 +1794,6 @@ def uniprot_fetch_by_gene(gene_name: str):
     results = _uniprot_result(response)
     return results[0] if results else None
 
-
 def uniprot_fetch_by_organism(tax_id: str):
     response = requests.get(
         UNIPROT_ORGANISM_ENDPOINT.format(tax_id=str(tax_id).strip()),
@@ -1834,7 +1801,6 @@ def uniprot_fetch_by_organism(tax_id: str):
     )
     results = _uniprot_result(response)
     return results[0] if results else None
-
 
 def uniprot_fetcher(query: str, gene_name: str = "", tax_id: str = ""):
     try:
@@ -1876,7 +1842,6 @@ def uniprot_fetcher(query: str, gene_name: str = "", tax_id: str = ""):
     except Exception as exc:
         return {"status": "เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล UniProt", "error": str(exc)}
 
-
 def clinvar_fetcher(query: str):
     try:
         Entrez.email = "developer@example.com"
@@ -1894,12 +1859,11 @@ def clinvar_fetcher(query: str):
     except Exception as exc:
         return {"status": "เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูล ClinVar", "error": str(exc)}
 
-
 def kegg_fetcher(query: str):
     try:
         with st.spinner("กำลังสืบค้นข้อมูลวิถีเมแทบอลิซึมจาก KEGG..."):
             response = requests.get(
-                "[https://rest.kegg.jp/find/genes](https://rest.kegg.jp/find/genes)",
+                "https://rest.kegg.jp/find/genes",
                 params={"term": query},
                 timeout=API_TIMEOUT_SECONDS,
             )
@@ -1909,7 +1873,7 @@ def kegg_fetcher(query: str):
                 return {"status": "ไม่พบข้อมูลในระบบ KEGG", "query": query}
             gene_id = matches[0][0]
             link_response = requests.get(
-                f"[https://rest.kegg.jp/link/pathway/](https://rest.kegg.jp/link/pathway/){gene_id}",
+                f"https://rest.kegg.jp/link/pathway/{gene_id}",
                 timeout=API_TIMEOUT_SECONDS,
             )
             link_response.raise_for_status()
@@ -1918,12 +1882,11 @@ def kegg_fetcher(query: str):
     except Exception as exc:
         return {"status": "เกิดข้อผิดพลาดในการเชื่อมต่อระบบ KEGG", "error": str(exc)}
 
-
 def pdb_fetcher(query: str):
     try:
         with st.spinner("กำลังสืบค้นโครงสร้างโปรตีนจาก RCSB PDB..."):
             response = requests.post(
-                "[https://search.rcsb.org/rcsbsearch/v2/query](https://search.rcsb.org/rcsbsearch/v2/query)",
+                "https://search.rcsb.org/rcsbsearch/v2/query",
                 json={
                     "query": {"type": "terminal", "service": "full_text", "parameters": {"value": query}},
                     "return_type": "entry",
@@ -1938,7 +1901,7 @@ def pdb_fetcher(query: str):
             entries = []
             for pdb_id in identifiers:
                 entry_response = requests.get(
-                    f"[https://data.rcsb.org/rest/v1/core/entry/](https://data.rcsb.org/rest/v1/core/entry/){pdb_id}",
+                    f"https://data.rcsb.org/rest/v1/core/entry/{pdb_id}",
                     timeout=API_TIMEOUT_SECONDS,
                 )
                 entry_response.raise_for_status()
@@ -1952,10 +1915,8 @@ def pdb_fetcher(query: str):
     except Exception as exc:
         return {"status": "เกิดข้อผิดพลาดในการเชื่อมต่อระบบ RCSB PDB", "error": str(exc)}
 
-
 def generate_txt(content: str) -> str:
     return content
-
 
 def generate_docx(content: str) -> bytes:
     document = WordDocument()
@@ -1972,7 +1933,6 @@ def generate_docx(content: str) -> bytes:
     binary_output = BytesIO()
     document.save(binary_output)
     return binary_output.getvalue()
-
 
 def build_attachment_content(uploaded_files, camera_image):
     content = []
@@ -2001,7 +1961,6 @@ def build_attachment_content(uploaded_files, camera_image):
         })
     return content, attachment_names
 
-
 def analyze_bio_context_with_attachments(metrics, attachments, query):
     existing_report = st.session_state.get("bio_report", "")
     attachment_parts, attachment_names = attachments
@@ -2010,9 +1969,6 @@ def analyze_bio_context_with_attachments(metrics, attachments, query):
 จงวิเคราะห์ข้อมูลเดิมและไฟล์เอกสารแนบที่ผู้ใช้ส่งมา โดยต้องแยกแยะข้อเท็จจริงออกจาก
 การคาดเดา
 ห้ามนำเสนอข้อมูลหรือจัดทำเอกสารอ้างอิงที่ไม่มีหลักฐานเชิงประจักษ์รองรับ และให้ระบุข้อจำกัดหากปริมาณข้อมูลไม่เพียงพอ
-
-ข้อมูลสถิติเชิงชีวสารสนเทศ (Bioinformatics Output):
-{existing_report or '(ยังไม่มีรายงานวิเคราะห์ โปรดอ้างอิงจากข้อมูลตัวเลขด้านล่าง)'}
 
 ข้อมูลเชิงปริมาณ (Deterministic Metrics):
 {json.dumps(metrics, ensure_ascii=False, indent=2)}
@@ -2027,9 +1983,8 @@ def analyze_bio_context_with_attachments(metrics, attachments, query):
     ).invoke([HumanMessage(content=message_content)])
     return extract_text(response)
 
-
 # =============================================================================
-# Bioinformatics UI — Professional Scientific Layout (PART 1, 3-10)
+# Bioinformatics UI — Professional Scientific Layout
 # =============================================================================
 def render_bioinformatics():
     st.markdown("### Bioinformatics Analysis Agent", unsafe_allow_html=True)
@@ -2192,7 +2147,7 @@ def render_bioinformatics():
         st.session_state.bio_evidence = evidence
 
         prompt = f"""ข้อมูลรวบรวมจากเครือข่ายฐานข้อมูลวิชาการแบบเปิด (Open Access):
-ข้อกำหนด: ผู้ช่วยวิเคราะห์ต้องดำเนินการสังเคราะห์ข้อมูลจากข้อมูล 3 ชุดด้านล่างนี้เท่านั้น ห้ามอ้างอิงข้อมูลภายนอกหรือคาดเดาสิ่งที่ไม่ปรากฏในหลักฐาน
+ข้อกำหนด: ผู้ช่วยวิเคราะห์ต้องดำเนินการสังเคราะห์ข้อมูลจากข้อมูล 3 ชุดด้านล่างนี้เท่านั้น ห้ามอ้างอิงข้อมูลภายนอกหรือคาดเดาสิ่งที่ปรากฏในหลักฐาน
 ข้อเท็จจริง (Facts) และการอนุมาน (Inferences) ทั้งหมดต้องมีเอกสารอ้างอิงกำกับทันที
 กรุณาจัดโครงสร้างการรายงานโดยแบ่งหัวข้อข้อเท็จจริงและการอนุมานออกจากกันอย่างชัดเจน
 หากไม่พบข้อมูลในส่วนใด ให้ระบุข้อความ "ไม่พบข้อมูลที่ตรงกันในฐานข้อมูล [ชื่อระบบ]"
@@ -2211,7 +2166,7 @@ def render_bioinformatics():
 </open_access_context>
 
 โปรดวิเคราะห์ข้อมูลทั้งหมดอย่างเคร่งครัดตามแนวปฏิบัติข้างต้น
-ข้อกำหนดหรือคำสั่งเพิ่มเติมจากผู้ใช้งาน: {query or 'จงวิเคราะห์หน้าที่และความสำคัญทางชีวภาพของลำดับเบสนี้'}
+ข้อกำหนดหรือคำสั่งเพิ่มเติมจากผู้ใช้: {query or 'จงวิเคราะห์หน้าที่และความสำคัญทางชีวภาพของลำดับเบสนี้'}
 """
         try:
             with st.spinner("ระบบกำลังสังเคราะห์ผลลัพธ์การวิเคราะห์ผ่านเครือข่าย AI..."):
@@ -2219,15 +2174,15 @@ def render_bioinformatics():
                     st.session_state.active_model_choice,
                     st.session_state.active_model_key,
                 ).invoke([HumanMessage(content=prompt)])
-                report = extract_text(response)
-                st.session_state.bio_report = report
+            report = extract_text(response)
+            st.session_state.bio_report = report
             pipeline_states["AI Interpretation"] = "done"
             pipeline_states["Evidence Verification"] = "done"
             pipeline_states["Report Generation"] = "done"
             analysis_log.log("AI interpretation completed")
             analysis_log.log("Report generated")
-        except Exception:
-            st.error("เกิดข้อผิดพลาดในการวิเคราะห์ลำดับเบสผ่านแบบจำลองภาษา กรุณาตรวจสอบ API Key, โควตาการใช้งาน หรือติดต่อผู้พัฒนาระบบ")
+        except Exception as e:
+            st.error(f"เกิดข้อผิดพลาดในการวิเคราะห์ลำดับเบสผ่านแบบจำลองภาษา: {type(e).__name__}: {e}")
             pipeline_states["AI Interpretation"] = "pending"
             analysis_log.log("AI interpretation failed", is_error=True)
 
@@ -2236,7 +2191,7 @@ def render_bioinformatics():
         st.divider()
 
         st.markdown("#### 2. AI Interpretation")
-        st.caption("ส่วนนี้เป็นการตีความโดย AI ไม่ใช่หลักฐานเชิงทดลอง (Experimental Evidence)")
+        st.caption("ส่วนนี้เป็นตีความโดย AI ไม่ใช่หลักฐานเชิงทดลอง (Experimental Evidence)")
         st.markdown(f'<div class="report-body">{report}</div>', unsafe_allow_html=True)
 
         evidence = st.session_state.get("bio_evidence")
@@ -2291,7 +2246,6 @@ def render_bioinformatics():
                 file_name="bioinformatics_report.txt",
                 mime="text/plain",
             )
-
 
 # =============================================================================
 # State router: each mode owns its own session-state keys
