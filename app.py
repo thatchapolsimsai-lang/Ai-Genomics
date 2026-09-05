@@ -14,6 +14,7 @@ from typing import List
 from urllib.error import HTTPError, URLError
 import streamlit as st
 from Bio import Entrez, SeqIO
+from Bio.Blast import NCBIWWW, NCBIXML
 from Bio.Seq import Seq
 from docx import Document as WordDocument
 from langchain_core.messages import HumanMessage
@@ -35,6 +36,7 @@ UNIPROT_ENTRY_ENDPOINT = "https://rest.uniprot.org/uniprotkb/{accession_id}?form
 UNIPROT_GENE_ENDPOINT = "https://rest.uniprot.org/uniprotkb/search?query=gene:{gene_name}&format=json"
 UNIPROT_ORGANISM_ENDPOINT = "https://rest.uniprot.org/uniprotkb/search?query=organism_id:{tax_id}&format=json"
 API_TIMEOUT_SECONDS = 20
+BLAST_TIMEOUT_SECONDS = 180
 
 # Model ids are configurable via env/secrets since they depend on whichever
 # account or reseller the deployment actually has credentials for.
@@ -1722,6 +1724,41 @@ def fetch_ncbi_identification(sequence_id: str, sequence: str):
     except Exception as exc:
         return {"status": "ระบบไม่สามารถดึงข้อมูลระบุตัวตนจาก NCBI ได้", "error": str(exc), **result}
 
+def _run_blast_query(sequence: str):
+    result_handle = NCBIWWW.qblast("blastn", "nt", sequence, hitlist_size=1, expect=10)
+    try:
+        return NCBIXML.read(result_handle)
+    finally:
+        result_handle.close()
+
+def blast_identify_sequence(sequence: str) -> dict:
+    """Identify a sequence that has no direct database record by comparing
+    it against NCBI's nt database with BLAST. This is a real similarity
+    search rather than a text lookup, so it can identify raw sequencing
+    reads or unlabelled contigs -- but NCBI queues remote BLAST jobs, so a
+    single search can take anywhere from under a minute to several minutes.
+    Bounded by BLAST_TIMEOUT_SECONDS so it can never hang indefinitely."""
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            blast_record = executor.submit(_run_blast_query, sequence).result(timeout=BLAST_TIMEOUT_SECONDS)
+    except concurrent.futures.TimeoutError:
+        return {"status": f"การค้นหาด้วย BLAST ใช้เวลาเกิน {BLAST_TIMEOUT_SECONDS} วินาที กรุณาลองใหม่อีกครั้ง"}
+    except Exception as exc:
+        return {"status": f"การค้นหาด้วย BLAST ล้มเหลว: {exc}"}
+
+    if not blast_record.alignments:
+        return {"status": "ไม่พบลำดับที่คล้ายคลึงกันในฐานข้อมูล NCBI ด้วยวิธี BLAST"}
+
+    alignment = blast_record.alignments[0]
+    hsp = alignment.hsps[0]
+    identity_percent = (hsp.identities / hsp.align_length * 100) if hsp.align_length else None
+    return {
+        "accession": alignment.accession or alignment.hit_id,
+        "blast_hit_description": alignment.hit_def,
+        "e_value": hsp.expect,
+        "identity_percent": round(identity_percent, 2) if identity_percent is not None else None,
+    }
+
 def fetch_literature_data(query: str):
     records, _ = fetch_online_open_access_context(query)
     return [
@@ -1976,6 +2013,16 @@ def render_bioinformatics():
         placeholder="ตัวอย่าง: จงวิเคราะห์หน้าที่ทางชีวภาพและบทบาททางพยาธิวิทยาของลำดับเบสนี้",
     )
 
+    use_blast = st.checkbox(
+        "ค้นหาด้วย BLAST หากไม่พบข้อมูลโดยตรงใน NCBI",
+        key="use_blast_fallback",
+        help=(
+            "สำหรับลำดับเบสที่ไม่มีรหัสอ้างอิงตรงกับฐานข้อมูล (เช่น read จากเครื่อง sequencer) "
+            "การค้นหาโดยตรงจะไม่พบข้อมูลเสมอ BLAST จะเทียบความคล้ายคลึงของลำดับเบสแทน "
+            "ซึ่งมีโอกาสระบุชนิดสิ่งมีชีวิตหรือยีนได้มากกว่า แต่ใช้เวลานานกว่ามาก (อาจถึงหลายนาที)"
+        ),
+    )
+
     analysis_submitted = st.button("ประมวลผลและสร้างรายงานวิชาการ", type="primary")
 
     pipeline_states = {step: "pending" for step in PIPELINE_STEPS}
@@ -2087,6 +2134,18 @@ def render_bioinformatics():
             "KEGG": kegg_result,
             "RCSB PDB": pdb_result,
         }
+
+        if use_blast and "status" in identification_data:
+            analysis_log.log("Direct NCBI lookup found nothing; starting BLAST search")
+            with st.spinner("กำลังค้นหาด้วย BLAST (อาจใช้เวลาหลายนาที กรุณารอสักครู่)..."):
+                blast_result = blast_identify_sequence(metrics["sequence"])
+            if "status" in blast_result:
+                analysis_log.log(f"BLAST search: {blast_result['status']}", is_error=True)
+                identification_data["blast_status"] = blast_result["status"]
+            else:
+                identification_data.pop("status", None)
+                identification_data.update(blast_result)
+                analysis_log.log("BLAST search found a matching sequence")
 
         pipeline_states["Database Retrieval"] = "done"
         pipeline_states["Computational Analysis"] = "done"
