@@ -3,8 +3,6 @@ biopython
 requests
 python-docx
 pypdf
-langchain-chroma
 langchain-core
 langchain-google-genai
-langchain-text-splitters
-langchain-openai
+langchain-anthropic
