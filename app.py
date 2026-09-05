@@ -1,101 +1,62 @@
-import gc
 import base64
-import hashlib
+import concurrent.futures
 import json
 import os
 import re
 import requests
-import shutil
+import sqlite3
 import time
 import uuid
-import zipfile
-import tarfile
-import gzip
 from datetime import datetime
 from io import BytesIO, StringIO
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 from urllib.error import HTTPError, URLError
 import streamlit as st
 from Bio import Entrez, SeqIO
 from Bio.Seq import Seq
 from docx import Document as WordDocument
-from langchain_chroma import Chroma
-from langchain_core.documents import Document
-from langchain_core.embeddings import Embeddings
+from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_google_genai import ChatGoogleGenerativeAI
 from pypdf import PdfReader
-try:
-    from langchain_groq import ChatGroq
-except ImportError:
-    ChatGroq = None
-try:
-    from langchain_nvidia_ai_endpoints import ChatNVIDIA
-except ImportError:
-    ChatNVIDIA = None
 
 # =============================================================================
 # Configuration and shared helpers
 # =============================================================================
 PROJECT_FOLDER = Path(__file__).resolve().parent
-PDF_FOLDER = PROJECT_FOLDER
-VECTOR_DB_PATH = PROJECT_FOLDER / "vector_db"
-FINGERPRINT_FILE = VECTOR_DB_PATH / "pdf_fingerprint.txt"
 
 DATA_CACHE_DIR = PROJECT_FOLDER / "data"
-for _sub in ("ncbi", "ensembl", "uniprot", "pdb", "interpro", "ucsc"):
-    (DATA_CACHE_DIR / _sub).mkdir(parents=True, exist_ok=True)
+DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+CHAT_DB_PATH = DATA_CACHE_DIR / "chat_history.db"
 
-RAG_MODEL = "gemini-3.6-flash"
-EMBEDDING_MODEL = "gemini-embedding-2-preview"
-EMBED_BATCH_SIZE = 25
-EMBED_BATCH_DELAY_SECONDS = 2.0
-EMBED_MAX_RETRIES = 6
-RETRIEVER_K = 5
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 150
 ONLINE_RESULT_LIMIT = 5
-ONLINE_TIMEOUT_SECONDS = 30  # เพิ่มจาก 20 → 30
+ONLINE_TIMEOUT_SECONDS = 30
 UNIPROT_ENTRY_ENDPOINT = "https://rest.uniprot.org/uniprotkb/{accession_id}?format=json"
 UNIPROT_GENE_ENDPOINT = "https://rest.uniprot.org/uniprotkb/search?query=gene:{gene_name}&format=json"
 UNIPROT_ORGANISM_ENDPOINT = "https://rest.uniprot.org/uniprotkb/search?query=organism_id:{tax_id}&format=json"
 API_TIMEOUT_SECONDS = 20
 
+# Model ids default to current, verified-real releases; override via env if a
+# newer version should be used without touching code.
+GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-2.5-flash")
+CLAUDE_MODEL_NAME = os.getenv("CLAUDE_MODEL_NAME", "claude-sonnet-5")
+
 MODEL_OPTIONS = {
-    "Gemini 3.6 Flash": {
+    "Gemini 2.5 Flash": {
         "provider": "google",
-        "model": "gemini-3.6-flash",
+        "model": GEMINI_MODEL_NAME,
         "secret": "GOOGLE_API_KEY",
     },
-    "Claude 3.5": {
-        "provider": "9arm",
-        "model": "claude-3.5-sonnet",
-        "secret": "NINEARM_API_KEY",
-    },
-    "Llama 3 8B": {
-        "provider": "groq",
-        "model": "llama3-8b-8192",
-        "secret": "GROQ_API_KEY",
-    },
-    "Mixtral 8x7B": {
-        "provider": "groq",
-        "model": "mixtral-8x7b-32768",
-        "secret": "GROQ_API_KEY",
-    },
-    "Llama 3 70B": {
-        "provider": "nvidia",
-        "model": "meta/llama3-70b-instruct",
-        "secret": "NVIDIA_API_KEY",
+    "Claude Sonnet 5": {
+        "provider": "anthropic",
+        "model": CLAUDE_MODEL_NAME,
+        "secret": "ANTHROPIC_API_KEY",
     },
 }
 
 st.set_page_config(
     page_title="AI Research Workbench",
-    page_icon="🧬",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -794,6 +755,10 @@ NCBI_API_KEY = get_configured_key("NCBI_API_KEY")
 if NCBI_API_KEY:
     Entrez.api_key = NCBI_API_KEY
 
+# NCBI asks every E-utilities caller to identify itself with a real contact
+# address; a fixed placeholder is set once here rather than per call.
+Entrez.email = get_configured_key("NCBI_CONTACT_EMAIL") or "developer@example.com"
+
 def get_active_llm(model_choice: str, api_key: str):
     config = MODEL_OPTIONS.get(model_choice)
     if config is None:
@@ -803,37 +768,35 @@ def get_active_llm(model_choice: str, api_key: str):
 
     if config["provider"] == "google":
         return ChatGoogleGenerativeAI(model=config["model"], temperature=0.2, google_api_key=api_key)
-    if config["provider"] == "9arm":
-        try:
-            from langchain_openai import ChatOpenAI
-        except ImportError:
-            raise RuntimeError("ไม่พบไลบรารี langchain-openai สำหรับใช้งาน API กรุณาติดต่อผู้พัฒนาระบบ")
-        return ChatOpenAI(
-            model=config["model"],
-            temperature=0.2,
-            api_key=api_key,
-            base_url="https://api.9arm.com/v1"
-        )
-    if config["provider"] == "groq":
-        if ChatGroq is None:
-            raise RuntimeError("ไม่พบไลบรารี langchain-groq กรุณาติดต่อผู้พัฒนาระบบ")
-        return ChatGroq(model=config["model"], temperature=0.2, groq_api_key=api_key)
-    if config["provider"] == "nvidia":
-        if ChatNVIDIA is None:
-            raise RuntimeError("ไม่พบไลบรารี langchain-nvidia-ai-endpoints กรุณาติดต่อผู้พัฒนาระบบ")
-        return ChatNVIDIA(model=config["model"], temperature=0.2, api_key=api_key)
+    if config["provider"] == "anthropic":
+        return ChatAnthropic(model=config["model"], temperature=0.2, api_key=api_key)
+    raise ValueError(f"ไม่รองรับผู้ให้บริการโมเดลนี้: {config['provider']} กรุณาติดต่อผู้พัฒนาระบบ")
 
-# =============================================================================
-# NEW: Convert Thai query to English for Open Access search
-# =============================================================================
-def to_english_query(query: str) -> str:
-    """แปลง query ไทยเป็นคำค้นหาภาษาอังกฤส"""
-    # ลบอักษรไทย
-    query_en = re.sub(r'[^\x00-\x7F]+', '', query).strip()
-    if query_en:
-        return query_en
-    # ถ้าไม่มีอักษรอังกฤษ ให้ใช้คำค้นหาพื้่นฐาน
-    return "biological research"
+def translate_query_to_english(query: str, model_choice: str, api_key: str) -> str:
+    """Turn a research question in any language into an effective English
+    search string for the (English-only) literature APIs. Falls back to the
+    original text -- never a generic placeholder -- if translation fails, so
+    a failed search is at least an honest empty result rather than a
+    misleadingly "successful" search on unrelated terms."""
+    stripped = (query or "").strip()
+    if not stripped:
+        return ""
+    ascii_chars = sum(1 for ch in stripped if ord(ch) < 128)
+    if ascii_chars / len(stripped) > 0.9:
+        return stripped
+    try:
+        llm = get_active_llm(model_choice, api_key)
+        instruction = (
+            "Translate the following research question into a short, effective "
+            "English search query for a biomedical literature database. "
+            "Reply with ONLY the search keywords, no punctuation, no explanation.\n\n"
+            f"Question: {stripped}"
+        )
+        response = llm.invoke([HumanMessage(content=instruction)])
+        translated = extract_text(response).strip().strip('"')
+        return translated or stripped
+    except Exception:
+        return stripped
 
 # =============================================================================
 # System Status — real connectivity checks
@@ -841,7 +804,6 @@ def to_english_query(query: str) -> str:
 @st.cache_resource(ttl=300)
 def check_ncbi_status() -> dict:
     try:
-        Entrez.email = "developer@example.com"
         with Entrez.esearch(db="nuccore", term="BRCA1", retmax=1) as h:
             result = Entrez.read(h)
         return {"status": "active", "detail": "NCBI reachable"}
@@ -878,11 +840,21 @@ def check_pdb_status() -> dict:
         return {"status": "inactive", "detail": f"RCSB PDB unreachable: {e}"}
 
 def render_sidebar_status():
-    """Render sidebar status section with real connectivity data."""
-    ncbi = check_ncbi_status()
-    uniprot = check_uniprot_status()
-    kegg = check_kegg_status()
-    pdb = check_pdb_status()
+    """Render sidebar status section with real connectivity data.
+
+    The four checks are independent network calls; running them concurrently
+    keeps a cold page load to roughly the slowest single check instead of
+    their sum (each has its own ~10s timeout)."""
+    checks = {
+        "ncbi": check_ncbi_status,
+        "uniprot": check_uniprot_status,
+        "kegg": check_kegg_status,
+        "pdb": check_pdb_status,
+    }
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(checks)) as executor:
+        results = {name: future.result() for name, future in
+                   {name: executor.submit(fn) for name, fn in checks.items()}.items()}
+    ncbi, uniprot, kegg, pdb = results["ncbi"], results["uniprot"], results["kegg"], results["pdb"]
 
     def dot(status):
         return {
@@ -1303,171 +1275,162 @@ def validate_uploaded_file(uploaded_file) -> tuple:
     return True, None, detected
 
 # =============================================================================
-# Module 1: Local Document RAG
+# Persistent chat history (SQLite)
 # =============================================================================
-def get_pdf_files() -> List[Path]:
-    return sorted(
-        (path for path in PDF_FOLDER.iterdir() if path.is_file() and path.suffix.lower() == ".pdf"),
-        key=lambda path: path.name.lower(),
-    )
+DEFAULT_CONVERSATION_TITLE = "การสนทนาใหม่"
 
-def calculate_pdf_fingerprint(pdf_files: List[Path]) -> str:
-    digest = hashlib.sha256()
-    digest.update(f"embedding:{EMBEDDING_MODEL}|chunk:{CHUNK_SIZE}|overlap:{CHUNK_OVERLAP}".encode())
-    for pdf_file in pdf_files:
-        stat = pdf_file.stat()
-        digest.update(f"{pdf_file.name}:{stat.st_size}:{stat.st_mtime_ns}".encode())
-    return digest.hexdigest()
+def _chat_db_connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(CHAT_DB_PATH))
+    conn.row_factory = sqlite3.Row
+    return conn
 
-def database_is_current(pdf_files: List[Path]) -> bool:
-    if not VECTOR_DB_PATH.exists() or not FINGERPRINT_FILE.exists():
-        return False
+def init_chat_db() -> None:
+    conn = _chat_db_connect()
     try:
-        return FINGERPRINT_FILE.read_text(encoding="utf-8").strip() == calculate_pdf_fingerprint(pdf_files)
-    except OSError:
-        return False
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                sources TEXT,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
-def remove_vector_database(max_attempts: int = 8) -> None:
-    if not VECTOR_DB_PATH.exists():
+def create_conversation(title: str = DEFAULT_CONVERSATION_TITLE) -> str:
+    conversation_id = uuid.uuid4().hex
+    now = datetime.now().isoformat()
+    conn = _chat_db_connect()
+    try:
+        conn.execute(
+            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (conversation_id, title, now, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return conversation_id
+
+def list_conversations(limit: int = 50) -> list:
+    conn = _chat_db_connect()
+    try:
+        rows = conn.execute(
+            "SELECT id, title, updated_at FROM conversations ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]
+
+def load_conversation_messages(conversation_id: str) -> list:
+    conn = _chat_db_connect()
+    try:
+        rows = conn.execute(
+            "SELECT role, content, sources FROM messages WHERE conversation_id = ? ORDER BY id ASC",
+            (conversation_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    messages = []
+    for row in rows:
+        message = {"role": row["role"], "content": row["content"]}
+        if row["sources"]:
+            message["sources"] = json.loads(row["sources"])
+        messages.append(message)
+    return messages
+
+def append_chat_message(conversation_id: str, role: str, content: str, sources=None) -> None:
+    now = datetime.now().isoformat()
+    conn = _chat_db_connect()
+    try:
+        conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, sources, created_at) VALUES (?, ?, ?, ?, ?)",
+            (conversation_id, role, content, json.dumps(sources, ensure_ascii=False) if sources else None, now),
+        )
+        conn.execute("UPDATE conversations SET updated_at = ? WHERE id = ?", (now, conversation_id))
+        if role == "user":
+            row = conn.execute("SELECT title FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
+            if row and row["title"] == DEFAULT_CONVERSATION_TITLE:
+                new_title = content.strip().splitlines()[0][:60] or DEFAULT_CONVERSATION_TITLE
+                conn.execute("UPDATE conversations SET title = ? WHERE id = ?", (new_title, conversation_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+def delete_conversation(conversation_id: str) -> None:
+    conn = _chat_db_connect()
+    try:
+        conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+        conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+init_chat_db()
+
+def ensure_chat_session_state() -> None:
+    if "current_conversation_id" in st.session_state:
         return
-    gc.collect()
-    last_error = None
-    for attempt in range(max_attempts):
-        try:
-            shutil.rmtree(VECTOR_DB_PATH)
-            return
-        except PermissionError as exc:
-            last_error = exc
-            gc.collect()
-            if attempt < max_attempts - 1:
-                time.sleep(min(2.0, 0.25 * (attempt + 1)))
-    raise PermissionError("ระบบฐานข้อมูลกำลังถูกใช้งานจากกระบวนการอื่น กรุณาปิดการเชื่อมต่อที่ค้างอยู่ หรือติดต่อผู้พัฒนาระบบ") from last_error
+    conversations = list_conversations()
+    if conversations:
+        st.session_state.current_conversation_id = conversations[0]["id"]
+    else:
+        st.session_state.current_conversation_id = create_conversation()
+    st.session_state.chat_history = load_conversation_messages(st.session_state.current_conversation_id)
 
-def load_pdf_documents(pdf_files: List[Path]):
-    documents, errors = [], []
-    for pdf_file in pdf_files:
-        try:
-            reader = PdfReader(str(pdf_file), strict=False)
-            found_text = False
-            for page_number, page in enumerate(reader.pages, start=1):
-                try:
-                    text = (page.extract_text() or "").strip()
-                    if text:
-                        found_text = True
-                        documents.append(Document(page_content=text, metadata={"source": pdf_file.name, "page": page_number}))
-                except Exception as exc:
-                    errors.append(f"{pdf_file.name} หน้า {page_number}: {exc}")
-            if not found_text:
-                errors.append(f"{pdf_file.name}: ไม่พบเนื้อหาข้อความ")
-        except Exception as exc:
-            errors.append(f"{pdf_file.name}: {exc}")
-    return documents, errors
-
-class RateLimitedGeminiEmbeddings(Embeddings):
-    def __init__(self, progress_callback=None):
-        self.inner = GoogleGenerativeAIEmbeddings(model=EMBEDDING_MODEL)
-        self.progress_callback = progress_callback
-
-    def _embed_with_retry(self, texts):
-        last_error = None
-        for attempt in range(EMBED_MAX_RETRIES):
-            try:
-                return self.inner.embed_documents(texts)
-            except Exception as exc:
-                last_error = exc
-                if not is_rate_limit_error(exc):
-                    raise
-                delay = min(120.0, max(30.0, EMBED_BATCH_DELAY_SECONDS * (2 ** min(attempt, 4))))
-                if self.progress_callback:
-                    self.progress_callback(f"การประมวลผลถึงขีดจำกัด (Quota): กรุณารอ {delay:.0f} วินาที")
-                time.sleep(delay)
-        raise RuntimeError(f"การสร้างชุดข้อมูล Embedding ล้มเหลว: {last_error} กรุณาติดต่อผู้พัฒนาระบบ")
-
-    def embed_documents(self, texts: List[str]):
-        results = []
-        for start in range(0, len(texts), EMBED_BATCH_SIZE):
-            batch = texts[start:start + EMBED_BATCH_SIZE]
-            results.extend(self._embed_with_retry(batch))
-            if self.progress_callback:
-                self.progress_callback(f"กำลังประมวลผลข้อมูล {min(start + len(batch), len(texts))}/{len(texts)} ส่วน")
-            if start + len(batch) < len(texts):
-                time.sleep(EMBED_BATCH_DELAY_SECONDS)
-        return results
-
-    def embed_query(self, text: str):
-        return self._embed_with_retry([text])[0]
-
-def build_vector_database(pdf_files, embeddings, progress_callback=None):
-    raw_documents, errors = load_pdf_documents(pdf_files)
-    if not raw_documents:
-        return None, "ไม่สามารถดึงข้อมูลจากไฟล์ PDF ได้ กรุณาตรวจสอบไฟล์ หรือติดต่อผู้พัฒนาระบบ\n" + "\n".join(errors)
-    splits = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP).split_documents(raw_documents)
-    if not splits:
-        return None, "ไม่พบเนื้อหาที่สามารถแบ่งส่วนประมวลผลได้ กรุณาติดต่อผู้พัฒนาระบบ"
-    if progress_callback:
-        progress_callback(f"อ่านเอกสารสำเร็จ {len(raw_documents)} หน้า, แบ่งเนื้อหาเป็น {len(splits)} ส่วน")
-    remove_vector_database()
-    vectorstore = Chroma(persist_directory=str(VECTOR_DB_PATH), embedding_function=embeddings, collection_name="mini_rag")
-    texts = [doc.page_content for doc in splits]
-    ids = [hashlib.sha256(f"{index}:{doc.page_content}".encode()).hexdigest() for index, doc in enumerate(splits)]
-    vectorstore._collection.add(ids=ids, documents=texts, metadatas=[doc.metadata for doc in splits], embeddings=embeddings.embed_documents(texts))
-    VECTOR_DB_PATH.mkdir(parents=True, exist_ok=True)
-    FINGERPRINT_FILE.write_text(calculate_pdf_fingerprint(pdf_files), encoding="utf-8")
-    return vectorstore, None
-
-@st.cache_resource
-def initialize_rag(pdf_fingerprint: str, model_choice: str, api_key: str):
-    pdf_files = get_pdf_files()
-    if not GOOGLE_API_KEY:
-        return None, None, "ไม่พบรหัส GOOGLE_API_KEY ในระบบ กรุณาติดต่อผู้พัฒนาระบบ"
-    try:
-        progress = []
-        embeddings = RateLimitedGeminiEmbeddings(progress.append)
-        error = None
-        if database_is_current(pdf_files):
-            vectorstore = Chroma(persist_directory=str(VECTOR_DB_PATH), embedding_function=embeddings, collection_name="mini_rag")
-            if vectorstore._collection.count() == 0:
-                vectorstore, error = build_vector_database(pdf_files, embeddings, progress.append)
-            else:
-                vectorstore, error = build_vector_database(pdf_files, embeddings, progress.append)
-        else:
-            vectorstore, error = build_vector_database(pdf_files, embeddings, progress.append)
-        if error:
-            return None, progress, error
-        retriever = vectorstore.as_retriever(search_kwargs={"k": RETRIEVER_K})
-        prompt = ChatPromptTemplate.from_template("""
-คุณคือ Expert Data Analyst ที่วิเคราะห์เอกสารอย่างมีหลักฐาน
-ใช้ Context เท่านั้น ห้ามแต่งข้อมูล หากข้อมูลไม่พอให้ระบุไว้ใน uncertainties
-ตอบเป็น JSON object ดิบเท่านั้น ห้ามใช้ Markdown code fence หรือข้อความอื่น
-ต้องตรงกับ schema นี้ทุกครั้ง:
-{{
-"summary": "String",
-"confidence_score": 0,
-"uncertainties": ["String"],
-"next_steps": ["String"]
-}}
-confidence_score ต้องเป็นจำนวนเต็มระหว่าง 0 ถึง 100
-Context:\n{context}\n\nResearch query:\n{question}
-""")
-        llm = get_active_llm(model_choice, api_key)
-
-        def format_docs(docs):
-            return "\n\n---\n\n".join(doc.page_content for doc in docs) or "ไม่พบเอกสารอ้างอิงที่เกี่ยวข้อง"
-
-        chain = ({"context": retriever | format_docs, "question": RunnablePassthrough()} | prompt | llm)
-        return vectorstore, (chain, retriever), None
-    except Exception as exc:
-        return None, None, f"การเตรียมฐานข้อมูลล้มเหลว: {exc} กรุณาติดต่อผู้พัฒนาระบบ"
+def render_chat_sidebar() -> None:
+    ensure_chat_session_state()
+    st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
+    st.markdown('<div class="sidebar-section-label">CONVERSATIONS</div>', unsafe_allow_html=True)
+    if st.button(DEFAULT_CONVERSATION_TITLE, key="new_conversation_btn", use_container_width=True):
+        st.session_state.current_conversation_id = create_conversation()
+        st.session_state.chat_history = []
+        st.rerun()
+    for convo in list_conversations():
+        is_active = convo["id"] == st.session_state.current_conversation_id
+        if st.button(
+            convo["title"],
+            key=f"load_convo_{convo['id']}",
+            use_container_width=True,
+            type="primary" if is_active else "secondary",
+        ):
+            st.session_state.current_conversation_id = convo["id"]
+            st.session_state.chat_history = load_conversation_messages(convo["id"])
+            st.rerun()
+    if st.session_state.chat_history:
+        if st.button("ลบการสนทนานี้", key="delete_current_conversation", use_container_width=True):
+            delete_conversation(st.session_state.current_conversation_id)
+            st.session_state.pop("current_conversation_id", None)
+            st.session_state.pop("chat_history", None)
+            st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # =============================================================================
-# FIXED: fetch_online_open_access_context with error display + English query
+# Literature search (Europe PMC + OpenAlex)
 # =============================================================================
 def fetch_online_open_access_context(query: str):
     context = []
     sources = []
 
-    # แปลง query เป็นอังกฤษก่อนส่ง
-    search_query = to_english_query(query)
+    search_query = translate_query_to_english(
+        query,
+        st.session_state.get("active_model_choice", ""),
+        st.session_state.get("active_model_key", ""),
+    )
+    if not search_query:
+        return [{"source": "Europe PMC / OpenAlex", "status": "empty query, search skipped"}], []
 
     with st.spinner("กำลังสืบค้นบทความวิชาการ (Open Access) จาก Europe PMC..."):
         try:
@@ -1533,18 +1496,13 @@ def fetch_online_open_access_context(query: str):
     return context, list(dict.fromkeys(sources))
 
 # =============================================================================
-# FIXED: render_online_research with unified chat input + history
+# Chat UI — Open Access research assistant
 # =============================================================================
-def render_document_rag():
-    render_online_research()
-
 def render_online_research():
     st.header("ระบบสืบค้นและวิเคราะห์ข้อมูลชีววิทยาแบบเปิด (Open Access Biology Research)")
-    st.caption("ระบบผู้ช่วยวิเคราะห์ที่อ้างอิงข้อมูลจากฐานข้อมูล Open Access ระดับสากล")
+    st.caption("ระบบผู้ช่วยวิเคราะห์ที่อ้างอิงข้อมูลจากฐานข้อมูล Open Access ระดับสากล และบันทึกประวัติการสนทนาให้โดยอัตโนมัติ")
 
-    # Initialize chat history
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
+    ensure_chat_session_state()
 
     with st.popover("แนบเอกสาร / ถ่ายภาพ"):
         attached_files = st.file_uploader(
@@ -1569,9 +1527,10 @@ def render_online_research():
     query = st.chat_input("พิมพ์คำถามเกี่ยวกับการวิจัยทางชีววิทยา หรือชีวสารสนเทศ...")
     
     if query:
-        # Add user message to history
+        conversation_id = st.session_state.current_conversation_id
         st.session_state.chat_history.append({"role": "user", "content": query})
-        
+        append_chat_message(conversation_id, "user", query)
+
         with st.chat_message("user"):
             st.markdown(query)
 
@@ -1620,27 +1579,22 @@ def render_online_research():
                         for source in sources:
                             st.write(source)
                 
-                # Add assistant message to history
                 st.session_state.chat_history.append({
-                    "role": "assistant", 
-                    "content": answer, 
+                    "role": "assistant",
+                    "content": answer,
                     "sources": sources
                 })
-                
+                append_chat_message(conversation_id, "assistant", answer, sources)
+
             except Exception as e:
                 answer = f"เกิดข้อผิดพลาดในการเชื่อมต่อฐานข้อมูลหรือประมวลผลโมเดล AI: {type(e).__name__}: {e}"
                 st.error(answer)
                 st.session_state.chat_history.append({
-                    "role": "assistant", 
-                    "content": answer, 
+                    "role": "assistant",
+                    "content": answer,
                     "sources": []
                 })
-
-    # Clear history button
-    if st.session_state.chat_history:
-        if st.button("🗑️ ล้างประวัติแชท", key="clear_chat_history"):
-            st.session_state.chat_history = []
-            st.rerun()
+                append_chat_message(conversation_id, "assistant", answer, [])
 
 # =============================================================================
 # Bioinformatics Pipeline
@@ -1692,7 +1646,6 @@ def fetch_ncbi_sequence(accession: str):
     if not accession:
         raise ValueError("กรุณาระบุรหัสอ้างอิง (NCBI Accession Number) เพื่อค้นหา")
 
-    Entrez.email = "developer@example.com"
     try:
         with st.spinner("ระบบกำลังสืบค้นลำดับเบสจาก GenBank..."):
             with Entrez.efetch(
@@ -1740,7 +1693,6 @@ def fetch_ncbi_identification(sequence_id: str, sequence: str):
         "tax_id": None,
     }
     try:
-        Entrez.email = "developer@example.com"
         with Entrez.esearch(db="nuccore", term=sequence_id, retmax=1) as search_handle:
             search_result = Entrez.read(search_handle)
         identifiers = search_result.get("IdList", [])
@@ -1844,7 +1796,6 @@ def uniprot_fetcher(query: str, gene_name: str = "", tax_id: str = ""):
 
 def clinvar_fetcher(query: str):
     try:
-        Entrez.email = "developer@example.com"
         with st.spinner("กำลังสืบค้นข้อมูลความผิดปกติทางพันธุกรรมจาก ClinVar..."):
             search_handle = Entrez.esearch(db="clinvar", term=query, retmax=5)
             search_result = Entrez.read(search_handle)
@@ -2089,8 +2040,9 @@ def render_bioinformatics():
     with st.expander("Translation Results"):
         st.code(f"mRNA:\n{metrics['mrna']}\n\nProtein (to Stop Codon):\n{metrics['protein'] or '(No protein before Stop Codon)'}")
 
-    if not GOOGLE_API_KEY:
-        st.warning("ระบบตรวจพบว่ายังไม่มีข้อมูล GOOGLE_API_KEY ซึ่งจำเป็นต่อกระบวนการวิเคราะห์ผลขั้นสูงด้วย AI")
+    if not st.session_state.get("active_model_key"):
+        model_choice = st.session_state.get("active_model_choice", "โมเดลที่เลือก")
+        st.warning(f"ระบบตรวจพบว่ายังไม่มีข้อมูล API Key สำหรับ {model_choice} ซึ่งจำเป็นต่อกระบวนการวิเคราะห์ผลขั้นสูงด้วย AI")
         return
 
     if analysis_submitted:
@@ -2286,19 +2238,22 @@ with st.sidebar:
     st.markdown('<div class="sidebar-section-label">ANALYSIS MODE</div>', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-section-desc">เลือกฟังก์ชันการใช้งาน</div>', unsafe_allow_html=True)
     st.session_state.active_mode = st.radio(
-        "",
+        "Analysis mode",
         MODE_OPTIONS,
         index=MODE_OPTIONS.index(st.session_state.active_mode),
         label_visibility="collapsed",
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
+    if st.session_state.active_mode == MODE_OPTIONS[0]:
+        render_chat_sidebar()
+
     st.markdown('<div class="sidebar-section">', unsafe_allow_html=True)
     st.markdown('<div class="sidebar-section-label">STATUS</div>', unsafe_allow_html=True)
     render_sidebar_status()
     st.markdown('</div>', unsafe_allow_html=True)
 
-if st.session_state.active_mode == "สืบค้นข้อมูล Open Access ออนไลน์":
-    render_document_rag()
+if st.session_state.active_mode == MODE_OPTIONS[0]:
+    render_online_research()
 else:
     render_bioinformatics()
