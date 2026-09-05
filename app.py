@@ -1,5 +1,6 @@
 import base64
 import concurrent.futures
+import gzip
 import json
 import os
 import re
@@ -29,6 +30,11 @@ PROJECT_FOLDER = Path(__file__).resolve().parent
 DATA_CACHE_DIR = PROJECT_FOLDER / "data"
 DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 CHAT_DB_PATH = DATA_CACHE_DIR / "chat_history.db"
+
+# Keep in sync with server.maxUploadSize in .streamlit/config.toml -- that
+# setting controls what Streamlit itself accepts, this controls what the
+# analyzer accepts after upload.
+MAX_UPLOAD_SIZE_MB = 1024
 
 ONLINE_RESULT_LIMIT = 5
 ONLINE_TIMEOUT_SECONDS = 30
@@ -1271,10 +1277,10 @@ def validate_uploaded_file(uploaded_file) -> tuple:
     if ext not in SUPPORTED_EXTENSIONS:
         return False, f"Unsupported file format: {ext}", "Unknown"
 
-    # Check size (existing system limit)
+    # Check size (matches server.maxUploadSize in .streamlit/config.toml)
     size = len(uploaded_file.getvalue())
-    if size > 200 * 1024 * 1024:  # 200MB
-        return False, "File size exceeds 200MB limit", "Unknown"
+    if size > MAX_UPLOAD_SIZE_MB * 1024 * 1024:
+        return False, f"File size exceeds {MAX_UPLOAD_SIZE_MB}MB limit", "Unknown"
 
     # Detect actual format
     file_bytes = uploaded_file.getvalue()
@@ -1629,8 +1635,13 @@ def parse_analysis_json(raw_response: str):
 # =============================================================================
 def parse_uploaded_sequence(uploaded_file):
     try:
-        content = uploaded_file.getvalue().decode("utf-8")
+        raw_bytes = uploaded_file.getvalue()
         filename = uploaded_file.name.lower()
+        if filename.endswith(".gz"):
+            raw_bytes = gzip.decompress(raw_bytes)
+            filename = filename[:-3]
+
+        content = raw_bytes.decode("utf-8")
         file_format = "fastq" if filename.endswith((".fastq", ".fq")) else "fasta"
 
         records = list(SeqIO.parse(StringIO(content), file_format))
@@ -1991,8 +2002,8 @@ def render_bioinformatics():
 
     if input_method == "อัปโหลดไฟล์ (File Upload)":
         uploaded_file = st.file_uploader(
-            "อัปโหลดไฟล์ลำดับเบส (FASTA / FASTQ)",
-            type=["fasta", "fa", "fastq", "fq"],
+            "อัปโหลดไฟล์ลำดับเบส (FASTA / FASTQ, รองรับไฟล์บีบอัด .gz)",
+            type=["fasta", "fa", "fna", "fastq", "fq", "gz"],
             key="sequence_file",
         )
     elif input_method == "ระบุข้อความ (Raw Text Input)":
